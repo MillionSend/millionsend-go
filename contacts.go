@@ -24,7 +24,8 @@ func (a ContactAddress) key() string {
 
 // CreateContactRequest is the payload for Contacts.Create. AudienceId selects
 // the endpoint and is not sent in the body; omit it to use POST /contacts
-// (which the API rejects unless a default audience applies).
+// (which the API always rejects with 422 "audience_id is required" —
+// kept optional only to mirror resend-go's shape).
 type CreateContactRequest struct {
 	AudienceId   string         `json:"-"`
 	Email        string         `json:"email"`
