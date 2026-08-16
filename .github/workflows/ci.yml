@@ -1,0 +1,23 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        go: ["1.21", "1.22"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+      # No go.sum is committed (fresh module); tidy resolves testify + writes it.
+      - run: go mod tidy
+      - run: go build ./...
+      - run: go vet ./...
+      - run: go test ./... -v
