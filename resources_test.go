@@ -37,43 +37,15 @@ func TestBatchSend(t *testing.T) {
 	assert.Len(t, res.Data, 2)
 }
 
-func TestAudiencesCRUD(t *testing.T) {
-	c, rec := mockServer(t, 200, `{"object":"audience","id":"a1","name":"Users"}`)
-	_, err := c.Audiences.Create(&CreateAudienceRequest{Name: "Users"})
+func TestContactsCreate(t *testing.T) {
+	c, rec := mockServer(t, 200, `{"object":"contact","id":"c1"}`)
+	_, err := c.Contacts.Create(&CreateContactRequest{Email: "c@x.dev", FirstName: "Ada"})
 	require.NoError(t, err)
 	assert.Equal(t, http.MethodPost, rec.Method)
-	assert.Equal(t, "/audiences", rec.Path)
-	assert.Equal(t, "Users", bodyMap(t, rec)["name"])
-
-	_, err = c.Audiences.Get("a1")
-	require.NoError(t, err)
-	assert.Equal(t, "/audiences/a1", rec.Path)
-
-	_, err = c.Audiences.List(&ListOptions{Limit: 10})
-	require.NoError(t, err)
-	assert.Equal(t, "/audiences", rec.Path)
-	assert.Equal(t, "limit=10", rec.RawQuery)
-
-	_, err = c.Audiences.Remove("a1")
-	require.NoError(t, err)
-	assert.Equal(t, http.MethodDelete, rec.Method)
-	assert.Equal(t, "/audiences/a1", rec.Path)
-}
-
-func TestContactsCreateScopedAndTopLevel(t *testing.T) {
-	c, rec := mockServer(t, 200, `{"object":"contact","id":"c1"}`)
-	_, err := c.Contacts.Create(&CreateContactRequest{AudienceId: "a1", Email: "c@x.dev", FirstName: "Ada"})
-	require.NoError(t, err)
-	assert.Equal(t, "/audiences/a1/contacts", rec.Path)
+	assert.Equal(t, "/contacts", rec.Path)
 	b := bodyMap(t, rec)
 	assert.Equal(t, "c@x.dev", b["email"])
 	assert.Equal(t, "Ada", b["first_name"])
-	_, hasAudience := b["audience_id"]
-	assert.False(t, hasAudience, "audienceId is path-only, not sent in the body")
-
-	_, err = c.Contacts.Create(&CreateContactRequest{Email: "c@x.dev"})
-	require.NoError(t, err)
-	assert.Equal(t, "/contacts", rec.Path)
 }
 
 func TestContactsAddressing(t *testing.T) {
@@ -85,10 +57,6 @@ func TestContactsAddressing(t *testing.T) {
 	_, err = c.Contacts.Get(ContactAddress{Email: "c@x.dev"})
 	require.NoError(t, err)
 	assert.Equal(t, "/contacts/c@x.dev", rec.Path)
-
-	_, err = c.Contacts.Get(ContactAddress{AudienceId: "a1", Id: "c1"})
-	require.NoError(t, err)
-	assert.Equal(t, "/audiences/a1/contacts/c1", rec.Path)
 
 	// Email wins when both are set.
 	_, err = c.Contacts.Get(ContactAddress{Id: "c1", Email: "e@x.dev"})
@@ -107,9 +75,9 @@ func TestContactsUpdateSendsProvidedFields(t *testing.T) {
 	assert.Equal(t, true, b["unsubscribed"])
 
 	// A nil pointer is omitted; an explicit false is still sent.
-	_, err = c.Contacts.Update(&UpdateContactRequest{AudienceId: "a1", Email: "c@x.dev", Unsubscribed: Ptr(false)})
+	_, err = c.Contacts.Update(&UpdateContactRequest{Email: "c@x.dev", Unsubscribed: Ptr(false)})
 	require.NoError(t, err)
-	assert.Equal(t, "/audiences/a1/contacts/c@x.dev", rec.Path)
+	assert.Equal(t, "/contacts/c@x.dev", rec.Path)
 	b = bodyMap(t, rec)
 	assert.Equal(t, false, b["unsubscribed"])
 	_, hasFirst := b["first_name"]
@@ -123,9 +91,9 @@ func TestContactsRemoveAndList(t *testing.T) {
 	assert.Equal(t, http.MethodDelete, rec.Method)
 	assert.Equal(t, "/contacts/c@x.dev", rec.Path)
 
-	_, err = c.Contacts.List("a1", &ListOptions{After: "cur"})
+	_, err = c.Contacts.List(&ListOptions{After: "cur"})
 	require.NoError(t, err)
-	assert.Equal(t, "/audiences/a1/contacts", rec.Path)
+	assert.Equal(t, "/contacts", rec.Path)
 	assert.Equal(t, "after=cur", rec.RawQuery)
 }
 
@@ -169,11 +137,11 @@ func TestTopicsCRUD(t *testing.T) {
 
 func TestBroadcastsLifecycle(t *testing.T) {
 	c, rec := mockServer(t, 200, `{"id":"b1"}`)
-	_, err := c.Broadcasts.Create(&CreateBroadcastRequest{AudienceId: "a1", From: "a@x.dev", Subject: "News", Html: "<p>hi</p>"})
+	_, err := c.Broadcasts.Create(&CreateBroadcastRequest{SegmentId: "s1", From: "a@x.dev", Subject: "News", Html: "<p>hi</p>"})
 	require.NoError(t, err)
 	assert.Equal(t, "/broadcasts", rec.Path)
 	b := bodyMap(t, rec)
-	assert.Equal(t, "a1", b["audience_id"])
+	assert.Equal(t, "s1", b["segment_id"])
 	assert.Equal(t, "News", b["subject"])
 
 	_, err = c.Broadcasts.Get("b1")
@@ -208,30 +176,29 @@ func TestBroadcastsLifecycle(t *testing.T) {
 func TestSegmentsCRUD(t *testing.T) {
 	c, rec := mockServer(t, 200, `{"object":"segment","id":"s1"}`)
 	filter := SegmentFilter{Match: "all", Conditions: []SegmentCondition{{Field: "email", Op: "is_set"}}}
-	_, err := c.Segments.Create(&CreateSegmentRequest{Name: "Active", AudienceId: "a1", Filter: filter})
+	_, err := c.Segments.Create(&CreateSegmentRequest{Name: "Active", Filter: filter})
 	require.NoError(t, err)
-	assert.Equal(t, "/segments2", rec.Path)
+	assert.Equal(t, "/segments", rec.Path)
 	b := bodyMap(t, rec)
 	assert.Equal(t, "Active", b["name"])
-	assert.Equal(t, "a1", b["audience_id"])
 	require.Contains(t, b, "filter")
 
 	_, err = c.Segments.Get("s1")
 	require.NoError(t, err)
-	assert.Equal(t, "/segments2/s1", rec.Path)
+	assert.Equal(t, "/segments/s1", rec.Path)
 
 	_, err = c.Segments.List(&ListOptions{Before: "cur"})
 	require.NoError(t, err)
-	assert.Equal(t, "/segments2", rec.Path)
+	assert.Equal(t, "/segments", rec.Path)
 	assert.Equal(t, "before=cur", rec.RawQuery)
 
 	_, err = c.Segments.Update("s1", &UpdateSegmentRequest{Name: "Renamed"})
 	require.NoError(t, err)
 	assert.Equal(t, http.MethodPatch, rec.Method)
-	assert.Equal(t, "/segments2/s1", rec.Path)
+	assert.Equal(t, "/segments/s1", rec.Path)
 
 	_, err = c.Segments.Remove("s1")
 	require.NoError(t, err)
 	assert.Equal(t, http.MethodDelete, rec.Method)
-	assert.Equal(t, "/segments2/s1", rec.Path)
+	assert.Equal(t, "/segments/s1", rec.Path)
 }

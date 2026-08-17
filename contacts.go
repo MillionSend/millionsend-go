@@ -7,12 +7,10 @@ import (
 )
 
 // ContactAddress identifies a contact by Id or Email (Email wins if both are
-// set), optionally scoped to an audience. Leave AudienceId empty for the
-// top-level /contacts endpoints.
+// set). Contacts are team-global.
 type ContactAddress struct {
-	AudienceId string
-	Id         string
-	Email      string
+	Id    string
+	Email string
 }
 
 func (a ContactAddress) key() string {
@@ -22,12 +20,9 @@ func (a ContactAddress) key() string {
 	return a.Id
 }
 
-// CreateContactRequest is the payload for Contacts.Create. AudienceId selects
-// the endpoint and is not sent in the body; omit it to use POST /contacts
-// (which the API always rejects with 422 "audience_id is required" —
-// kept optional only to mirror resend-go's shape).
+// CreateContactRequest is the payload for Contacts.Create. Contacts are unique
+// per team by email (case-insensitive); a duplicate is a 409 validation_error.
 type CreateContactRequest struct {
-	AudienceId   string         `json:"-"`
 	Email        string         `json:"email"`
 	FirstName    string         `json:"first_name,omitempty"`
 	LastName     string         `json:"last_name,omitempty"`
@@ -36,11 +31,10 @@ type CreateContactRequest struct {
 }
 
 // UpdateContactRequest is the payload for Contacts.Update. The addressing
-// fields (AudienceId/Id/Email) select the endpoint and are not sent in the
-// body. The body fields are pointers so a nil leaves the value unchanged while
-// an explicit value (including false or "") is sent.
+// fields (Id/Email) select the endpoint and are not sent in the body. The body
+// fields are pointers so a nil leaves the value unchanged while an explicit
+// value (including false or "") is sent.
 type UpdateContactRequest struct {
-	AudienceId   string         `json:"-"`
 	Id           string         `json:"-"`
 	Email        string         `json:"-"`
 	FirstName    *string        `json:"first_name,omitempty"`
@@ -96,53 +90,46 @@ type UpdateContactTopicsResponse struct {
 	Id string `json:"id"`
 }
 
-func contactsBase(audienceId string) string {
-	if audienceId != "" {
-		return "/audiences/" + url.PathEscape(audienceId) + "/contacts"
-	}
-	return "/contacts"
+func contactPath(idOrEmail string) string {
+	return "/contacts/" + url.PathEscape(idOrEmail)
 }
 
-func contactPath(audienceId, idOrEmail string) string {
-	return contactsBase(audienceId) + "/" + url.PathEscape(idOrEmail)
-}
-
-// ContactsService covers audience-scoped and top-level contact endpoints.
+// ContactsService covers the team-global /contacts endpoints.
 type ContactsService struct{ client *Client }
 
-// Create adds a contact to an audience (or the top-level list when AudienceId is empty).
+// Create adds a contact to the team.
 func (s *ContactsService) Create(params *CreateContactRequest) (*ContactId, error) {
 	return doJSON[ContactId](s.client, context.Background(), requestParams{
-		method: http.MethodPost, path: contactsBase(params.AudienceId), body: params,
+		method: http.MethodPost, path: "/contacts", body: params,
 	})
 }
 
 // Get fetches a contact by id or email.
 func (s *ContactsService) Get(addr ContactAddress) (*Contact, error) {
 	return doJSON[Contact](s.client, context.Background(), requestParams{
-		method: http.MethodGet, path: contactPath(addr.AudienceId, addr.key()),
+		method: http.MethodGet, path: contactPath(addr.key()),
 	})
 }
 
 // Update patches a contact. Nil body fields are left unchanged.
 func (s *ContactsService) Update(params *UpdateContactRequest) (*ContactId, error) {
-	addr := ContactAddress{AudienceId: params.AudienceId, Id: params.Id, Email: params.Email}
+	addr := ContactAddress{Id: params.Id, Email: params.Email}
 	return doJSON[ContactId](s.client, context.Background(), requestParams{
-		method: http.MethodPatch, path: contactPath(addr.AudienceId, addr.key()), body: params,
+		method: http.MethodPatch, path: contactPath(addr.key()), body: params,
 	})
 }
 
 // Remove deletes a contact by id or email.
 func (s *ContactsService) Remove(addr ContactAddress) (*RemoveContactResponse, error) {
 	return doJSON[RemoveContactResponse](s.client, context.Background(), requestParams{
-		method: http.MethodDelete, path: contactPath(addr.AudienceId, addr.key()),
+		method: http.MethodDelete, path: contactPath(addr.key()),
 	})
 }
 
-// List returns contacts in an audience (or the top-level list when audienceId is empty).
-func (s *ContactsService) List(audienceId string, opts *ListOptions) (*ListResponse[ContactListItem], error) {
+// List returns the team's contacts, paginated. Pass nil for defaults.
+func (s *ContactsService) List(opts *ListOptions) (*ListResponse[ContactListItem], error) {
 	return doJSON[ListResponse[ContactListItem]](s.client, context.Background(), requestParams{
-		method: http.MethodGet, path: contactsBase(audienceId), query: opts.values(),
+		method: http.MethodGet, path: "/contacts", query: opts.values(),
 	})
 }
 
@@ -150,6 +137,6 @@ func (s *ContactsService) List(audienceId string, opts *ListOptions) (*ListRespo
 // API expects, at PATCH /contacts/{idOrEmail}/topics.
 func (s *ContactsService) UpdateTopics(addr ContactAddress, topics []ContactTopicUpdate) (*UpdateContactTopicsResponse, error) {
 	return doJSON[UpdateContactTopicsResponse](s.client, context.Background(), requestParams{
-		method: http.MethodPatch, path: "/contacts/" + url.PathEscape(addr.key()) + "/topics", body: topics,
+		method: http.MethodPatch, path: contactPath(addr.key()) + "/topics", body: topics,
 	})
 }

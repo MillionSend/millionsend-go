@@ -6,30 +6,29 @@ import (
 	"net/url"
 )
 
-// CreateBroadcastRequest is the payload for Broadcasts.Create.
+// CreateBroadcastRequest is the payload for Broadcasts.Create. SegmentId and
+// TopicId are optional targeting; neither set sends to all the team's contacts.
 type CreateBroadcastRequest struct {
-	Name       string `json:"name,omitempty"`
-	AudienceId string `json:"audience_id,omitempty"`
-	SegmentId  string `json:"segment_id,omitempty"`
-	From       string `json:"from"`
-	Subject    string `json:"subject"`
-	Html       string `json:"html,omitempty"`
-	Text       string `json:"text,omitempty"`
-	ReplyTo    string `json:"reply_to,omitempty"`
-	TopicId    string `json:"topic_id,omitempty"`
+	Name      string `json:"name,omitempty"`
+	SegmentId string `json:"segment_id,omitempty"`
+	From      string `json:"from"`
+	Subject   string `json:"subject"`
+	Html      string `json:"html,omitempty"`
+	Text      string `json:"text,omitempty"`
+	ReplyTo   string `json:"reply_to,omitempty"`
+	TopicId   string `json:"topic_id,omitempty"`
 }
 
 // UpdateBroadcastRequest is the payload for Broadcasts.Update (draft only).
 type UpdateBroadcastRequest struct {
-	Name       string `json:"name,omitempty"`
-	AudienceId string `json:"audience_id,omitempty"`
-	SegmentId  string `json:"segment_id,omitempty"`
-	From       string `json:"from,omitempty"`
-	Subject    string `json:"subject,omitempty"`
-	Html       string `json:"html,omitempty"`
-	Text       string `json:"text,omitempty"`
-	ReplyTo    string `json:"reply_to,omitempty"`
-	TopicId    string `json:"topic_id,omitempty"`
+	Name      string `json:"name,omitempty"`
+	SegmentId string `json:"segment_id,omitempty"`
+	From      string `json:"from,omitempty"`
+	Subject   string `json:"subject,omitempty"`
+	Html      string `json:"html,omitempty"`
+	Text      string `json:"text,omitempty"`
+	ReplyTo   string `json:"reply_to,omitempty"`
+	TopicId   string `json:"topic_id,omitempty"`
 }
 
 // SendBroadcastRequest is the payload for Broadcasts.Send. Leave ScheduledAt
@@ -43,11 +42,11 @@ type BroadcastId struct {
 	Id string `json:"id"`
 }
 
-// BroadcastListItem is a row from Broadcasts.List.
+// BroadcastListItem is a row from Broadcasts.List. SegmentId is the linked
+// segment, empty when the broadcast targets all contacts.
 type BroadcastListItem struct {
 	Id          string `json:"id"`
 	Name        string `json:"name"`
-	AudienceId  string `json:"audience_id"`
 	SegmentId   string `json:"segment_id"`
 	Status      string `json:"status"`
 	CreatedAt   string `json:"created_at"`

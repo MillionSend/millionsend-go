@@ -101,24 +101,22 @@ client.Batch.Send([]*millionsend.SendEmailRequest{a, b}, millionsend.WithIdempot
 `To`/`Cc`/`Bcc` are `[]string`; `ReplyTo` and `ScheduledAt` map to `reply_to`
 and `scheduled_at` on the wire.
 
-### Audiences & contacts
+### Contacts
+
+Contacts are team-global: one list per team, unique by email
+(case-insensitive). Creating a duplicate is a `409 validation_error`.
 
 ```go
-aud, _ := client.Audiences.Create(&millionsend.CreateAudienceRequest{Name: "Registered users"})
-client.Audiences.List(&millionsend.ListOptions{Limit: 20, After: cursor})
-client.Audiences.Get(aud.Id)
-client.Audiences.Remove(aud.Id)
-
 client.Contacts.Create(&millionsend.CreateContactRequest{
-	AudienceId: aud.Id, Email: "ada@acme.dev", FirstName: "Ada",
+	Email: "ada@acme.dev", FirstName: "Ada",
 	Properties: map[string]any{"plan": "pro"},
 })
-client.Contacts.Get(millionsend.ContactAddress{AudienceId: aud.Id, Email: "ada@acme.dev"}) // id or email (email wins)
+client.Contacts.Get(millionsend.ContactAddress{Email: "ada@acme.dev"}) // id or email (email wins)
 client.Contacts.Update(&millionsend.UpdateContactRequest{
 	Id: contactID, Unsubscribed: millionsend.Ptr(true), FirstName: millionsend.Ptr("Ada"),
 }) // nil fields are left unchanged
 client.Contacts.Remove(millionsend.ContactAddress{Email: "ada@acme.dev"})
-client.Contacts.List(aud.Id, &millionsend.ListOptions{Limit: 50}) // "" for the top-level list
+client.Contacts.List(&millionsend.ListOptions{Limit: 50})
 
 // Topic subscriptions (granular unsubscribe)
 client.Contacts.UpdateTopics(
@@ -138,9 +136,12 @@ client.Topics.Remove(id)
 
 ### Broadcasts
 
+Targeting is an optional `SegmentId` and/or `TopicId`; set neither to send to
+all the team's contacts.
+
 ```go
 b, _ := client.Broadcasts.Create(&millionsend.CreateBroadcastRequest{
-	AudienceId: aud.Id, From: "Acme <news@acme.dev>", Subject: "Launch",
+	SegmentId: segmentID, From: "Acme <news@acme.dev>", Subject: "Launch",
 	Html: "<p>Hi {{{FIRST_NAME|there}}}</p>",
 })
 client.Broadcasts.List(nil)
@@ -153,12 +154,12 @@ client.Broadcasts.Remove(b.Id) // draft only
 
 ### Segments (MillionSend extension)
 
-Dynamic segments are a saved filter over an audience's contacts — a MillionSend
-superset with no Resend equivalent (served at `/segments2`).
+Segments are a saved filter over the team's contacts — a MillionSend superset
+with no Resend equivalent (served at `/segments`).
 
 ```go
 client.Segments.Create(&millionsend.CreateSegmentRequest{
-	Name: "Pro plan", AudienceId: aud.Id,
+	Name: "Pro plan",
 	Filter: millionsend.SegmentFilter{
 		Match:      "all",
 		Conditions: []millionsend.SegmentCondition{{Field: "property:plan", Op: "equals", Value: "pro"}},
@@ -180,13 +181,14 @@ client.Segments.Remove(id)
 + client.BaseURL = "https://mail.acme.dev"
 ```
 
-Method names and nesting match (`client.Emails.Send`, `client.Audiences`,
-`client.Contacts`, `client.Broadcasts`, …). Notes:
+Method names and nesting match (`client.Emails.Send`, `client.Contacts`,
+`client.Broadcasts`, …). Notes:
 
 - **Domains and API keys** are managed in the MillionSend dashboard, not via the
   API, so there are no `.Domains`/`.ApiKeys` resources here.
-- Resend's `.segments` is an alias of audiences; MillionSend's `.Segments` is the
-  distinct dynamic-filter feature. Use `.Audiences` for a straight port.
+- **No audiences**: MillionSend contacts are one team-global list. Drop the
+  audience id from `.Contacts` calls; target broadcasts with a `.Segments`
+  filter (or a topic) instead.
 
 ## License
 
