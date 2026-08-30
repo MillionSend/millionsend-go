@@ -2,6 +2,7 @@ package millionsend
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -64,6 +65,50 @@ func TestNewClientEnvFallback(t *testing.T) {
 	t.Setenv("MILLIONSEND_BASE_URL", "https://mail.example.com")
 	c := NewClient("")
 	assert.Equal(t, "https://mail.example.com", c.BaseURL)
+}
+
+func TestRefusesNonLoopbackHTTPUnlessAllowed(t *testing.T) {
+	c := NewClient("ms_test")
+	c.BaseURL = "http://mail.example.com"
+	_, err := c.Emails.Get("e1")
+	var mse *MillionSendError
+	require.ErrorAs(t, err, &mse)
+	assert.Contains(t, mse.Message, "AllowInsecureHTTP")
+
+	t.Setenv("MILLIONSEND_BASE_URL", "http://mail.example.com")
+	_, err = NewClient("ms_test").Emails.Get("e1")
+	require.ErrorAs(t, err, &mse)
+	assert.Contains(t, mse.Message, "AllowInsecureHTTP")
+
+	// Opted in: the request goes out (and fails at the transport instead).
+	c.AllowInsecureHTTP = true
+	c.HTTPClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		assert.Equal(t, "http://mail.example.com/emails/e1", r.URL.String())
+		return nil, fmt.Errorf("sentinel")
+	})}
+	_, err = c.Emails.Get("e1")
+	require.ErrorAs(t, err, &mse)
+	assert.Contains(t, mse.Message, "sentinel")
+
+	// Loopback http is always fine (mockServer runs on 127.0.0.1).
+	lc, _ := mockServer(t, 200, `{}`)
+	_, err = lc.Emails.Get("e1")
+	require.NoError(t, err)
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestFormattingRedactsAPIKey(t *testing.T) {
+	c := NewClient("ms_secret_key")
+	for _, s := range []string{
+		fmt.Sprintf("%v", c), fmt.Sprintf("%+v", c), fmt.Sprintf("%#v", c),
+		fmt.Sprintf("%v", *c), fmt.Sprintf("%+v", *c), fmt.Sprintf("%#v", *c),
+		fmt.Sprint(c), fmt.Sprint(*c),
+	} {
+		assert.NotContains(t, s, "ms_secret_key")
+	}
 }
 
 func TestTrailingSlashStripped(t *testing.T) {

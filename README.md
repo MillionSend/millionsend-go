@@ -52,11 +52,16 @@ client := millionsend.NewClient(apiKey)
 client.BaseURL = "https://mail.acme.dev"        // override the base URL
 client.HTTPClient = &http.Client{Timeout: time.Minute} // bring your own transport
 client.UserAgent = "myapp/1.0 " + client.UserAgent      // extend the User-Agent
+client.AllowInsecureHTTP = true                          // accept a non-loopback http:// BaseURL
 ```
 
 - `apiKey` falls back to `MILLIONSEND_API_KEY` when empty.
 - `BaseURL` falls back to `MILLIONSEND_BASE_URL`, then `http://localhost:3001`.
   MillionSend is self-hosted, so **set this to your deployment in production.**
+- Plain `http://` is only accepted for loopback hosts (`localhost`, `127.0.0.1`, `::1`);
+  any other `http://` URL makes every call return an `application_error`, since the API
+  key is sent as a bearer header. Set `AllowInsecureHTTP = true` to talk to a non-TLS
+  instance elsewhere (e.g. inside a private network).
 
 Every method has a non-context form and, for the transactional hot path,
 `Emails.Send`/`Emails.Get`/`Emails.Cancel` and `Batch.Send` also expose a

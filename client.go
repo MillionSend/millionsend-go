@@ -22,6 +22,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -47,6 +48,9 @@ type Client struct {
 	HTTPClient *http.Client
 	// UserAgent is sent on every request.
 	UserAgent string
+	// AllowInsecureHTTP permits a plain http:// BaseURL on a non-loopback host.
+	// Off by default because the API key travels as a bearer header.
+	AllowInsecureHTTP bool
 
 	apiKey string
 
@@ -82,6 +86,25 @@ func NewClient(apiKey string) *Client {
 	c.Broadcasts = &BroadcastsService{client: c}
 	c.Segments = &SegmentsService{client: c}
 	return c
+}
+
+// String keeps the API key out of %v / %+v output (logs, panics).
+func (c Client) String() string {
+	return fmt.Sprintf("millionsend.Client{BaseURL:%q UserAgent:%q}", c.BaseURL, c.UserAgent)
+}
+
+// GoString keeps the API key out of %#v output.
+func (c Client) GoString() string { return c.String() }
+
+// isInsecureHTTPURL reports whether raw is an http:// URL on a non-loopback
+// host. Unparseable URLs are left for the transport to reject.
+func isInsecureHTTPURL(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "http" {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	return host != "localhost" && host != "::1" && !strings.HasPrefix(host, "127.")
 }
 
 // RequestOption configures a single request. Only Emails.Send and Batch.Send
@@ -161,7 +184,14 @@ func (c *Client) do(ctx context.Context, p requestParams, out any) error {
 		bodyReader = bytes.NewReader(buf)
 	}
 
-	u := strings.TrimRight(c.BaseURL, "/") + p.path
+	base := strings.TrimRight(c.BaseURL, "/")
+	if !c.AllowInsecureHTTP && isInsecureHTTPURL(base) {
+		return &MillionSendError{
+			Name:    "application_error",
+			Message: "refusing to send the API key over plain http to " + base + "; use https, or set Client.AllowInsecureHTTP = true",
+		}
+	}
+	u := base + p.path
 	if len(p.query) > 0 {
 		u += "?" + p.query.Encode()
 	}
