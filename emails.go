@@ -49,6 +49,34 @@ type Email struct {
 	ScheduledAt string   `json:"scheduled_at"`
 	MessageId   string   `json:"message_id"`
 	LastEvent   string   `json:"last_event"`
+	// Score is the best-practice score (0-10, one decimal); nil when the email
+	// has no insights (sent before the feature landed, or never sent).
+	Score *float64 `json:"score"`
+}
+
+// InsightCheck is one entry of EmailInsights.Checks. Id is an open set (the
+// catalog grows across score versions); Severity and Status are plain strings
+// so unknown future values never fail decoding.
+type InsightCheck struct {
+	Id       string         `json:"id"`
+	Severity string         `json:"severity"` // "critical" | "major" | "minor" | "info"
+	Status   string         `json:"status"`   // "pass" | "fail" | "passed_by_design" | "not_applicable" | "unknown"
+	Penalty  float64        `json:"penalty"`  // points deducted; 0 unless status is "fail"
+	Detail   map[string]any `json:"detail,omitempty"`
+}
+
+// EmailInsights is the pre-send best-practice report returned by
+// Emails.GetInsights.
+type EmailInsights struct {
+	Object        string         `json:"object"`
+	EmailId       string         `json:"email_id"`
+	Score         float64        `json:"score"` // 0-10, one decimal
+	ScoreVersion  int            `json:"score_version"`
+	Band          string         `json:"band"` // "excellent" | "good" | "needs_attention" | "at_risk"
+	Marketing     bool           `json:"marketing"`
+	HtmlSizeBytes *int64         `json:"html_size_bytes"`
+	ComputedAt    string         `json:"computed_at"`
+	Checks        []InsightCheck `json:"checks"`
 }
 
 // CancelEmailResponse is returned by Emails.Cancel.
@@ -91,6 +119,21 @@ func (s *EmailsService) GetWithContext(ctx context.Context, id string) (*Email, 
 	return doJSON[Email](s.client, ctx, requestParams{
 		method: http.MethodGet,
 		path:   "/emails/" + url.PathEscape(id),
+	})
+}
+
+// GetInsights fetches the deliverability insights for an email. The API
+// returns a 404 not_found when the id is unknown or insights are not
+// available for it yet.
+func (s *EmailsService) GetInsights(id string) (*EmailInsights, error) {
+	return s.GetInsightsWithContext(context.Background(), id)
+}
+
+// GetInsightsWithContext is GetInsights with a caller-supplied context.
+func (s *EmailsService) GetInsightsWithContext(ctx context.Context, id string) (*EmailInsights, error) {
+	return doJSON[EmailInsights](s.client, ctx, requestParams{
+		method: http.MethodGet,
+		path:   "/emails/" + url.PathEscape(id) + "/insights",
 	})
 }
 

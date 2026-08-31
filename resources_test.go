@@ -22,6 +22,122 @@ func TestEmailsGetAndCancel(t *testing.T) {
 	assert.Equal(t, "/emails/e1/cancel", rec.Path)
 }
 
+func TestEmailsGetScore(t *testing.T) {
+	c, _ := mockServer(t, 200, `{"object":"email","id":"e1","score":8.5}`)
+	e, err := c.Emails.Get("e1")
+	require.NoError(t, err)
+	require.NotNil(t, e.Score)
+	assert.Equal(t, 8.5, *e.Score)
+
+	c2, _ := mockServer(t, 200, `{"object":"email","id":"e1","score":null}`)
+	e, err = c2.Emails.Get("e1")
+	require.NoError(t, err)
+	assert.Nil(t, e.Score)
+}
+
+func TestEmailsGetInsights(t *testing.T) {
+	c, rec := mockServer(t, 200, `{
+		"object":"email_insights","email_id":"e1","score":8.5,"score_version":1,
+		"band":"excellent","marketing":true,"html_size_bytes":12345,
+		"computed_at":"2026-08-31T00:00:00Z",
+		"checks":[
+			{"id":"list_unsubscribe","severity":"critical","status":"fail","penalty":1.25,
+			 "detail":{"header":"List-Unsubscribe","found":false}},
+			{"id":"plain_text_part","severity":"minor","status":"pass","penalty":0}
+		]}`)
+	ins, err := c.Emails.GetInsights("e1")
+	require.NoError(t, err)
+	assert.Equal(t, http.MethodGet, rec.Method)
+	assert.Equal(t, "/emails/e1/insights", rec.Path)
+	assert.Equal(t, "email_insights", ins.Object)
+	assert.Equal(t, "e1", ins.EmailId)
+	assert.Equal(t, 8.5, ins.Score)
+	assert.Equal(t, 1, ins.ScoreVersion)
+	assert.Equal(t, "excellent", ins.Band)
+	assert.True(t, ins.Marketing)
+	require.NotNil(t, ins.HtmlSizeBytes)
+	assert.Equal(t, int64(12345), *ins.HtmlSizeBytes)
+	assert.Equal(t, "2026-08-31T00:00:00Z", ins.ComputedAt)
+	require.Len(t, ins.Checks, 2)
+	assert.Equal(t, "list_unsubscribe", ins.Checks[0].Id)
+	assert.Equal(t, "critical", ins.Checks[0].Severity)
+	assert.Equal(t, "fail", ins.Checks[0].Status)
+	assert.Equal(t, 1.25, ins.Checks[0].Penalty)
+	assert.Equal(t, false, ins.Checks[0].Detail["found"])
+	assert.Nil(t, ins.Checks[1].Detail)
+	assert.Equal(t, float64(0), ins.Checks[1].Penalty)
+
+	// html_size_bytes is nullable.
+	c2, _ := mockServer(t, 200, `{"object":"email_insights","email_id":"e1","score":10,"score_version":1,"band":"excellent","marketing":false,"html_size_bytes":null,"computed_at":"2026-08-31T00:00:00Z","checks":[]}`)
+	ins, err = c2.Emails.GetInsights("e1")
+	require.NoError(t, err)
+	assert.Nil(t, ins.HtmlSizeBytes)
+}
+
+func TestEmailsGetInsightsNotFound(t *testing.T) {
+	c, _ := mockServer(t, 404, `{"statusCode":404,"name":"not_found","message":"Email not found"}`)
+	_, err := c.Emails.GetInsights("missing")
+	var mse *MillionSendError
+	require.ErrorAs(t, err, &mse)
+	assert.Equal(t, 404, mse.StatusCode)
+	assert.Equal(t, "not_found", mse.Name)
+}
+
+// Band/severity/status/guardrail_status are open sets on the wire: a value
+// this SDK version has never seen must decode, not error.
+func TestInsightsTolerateUnknownEnumValues(t *testing.T) {
+	c, _ := mockServer(t, 200, `{"object":"email_insights","email_id":"e1","score":5,"score_version":9,"band":"stellar","marketing":false,"html_size_bytes":null,"computed_at":"2026-08-31T00:00:00Z","checks":[{"id":"brand_new_check","severity":"cosmic","status":"deferred","penalty":0}]}`)
+	ins, err := c.Emails.GetInsights("e1")
+	require.NoError(t, err)
+	assert.Equal(t, "stellar", ins.Band)
+	assert.Equal(t, "cosmic", ins.Checks[0].Severity)
+	assert.Equal(t, "deferred", ins.Checks[0].Status)
+
+	c2, _ := mockServer(t, 200, `{"object":"deliverability","score":1,"band":"abysmal","content_score":1,"outcome_score":1,"complaint_rate":0,"hard_bounce_rate":0,"emails_sent":1,"scored_recipients":1,"window_days":30,"insufficient_outcome_data":false,"guardrail_status":"quarantined","score_version":9}`)
+	d, err := c2.Deliverability.Get()
+	require.NoError(t, err)
+	assert.Equal(t, "abysmal", *d.Band)
+	assert.Equal(t, "quarantined", d.GuardrailStatus)
+}
+
+func TestDeliverabilityGet(t *testing.T) {
+	c, rec := mockServer(t, 200, `{
+		"object":"deliverability","score":8.7,"band":"good",
+		"content_score":8.2,"outcome_score":9.1,
+		"complaint_rate":0.0002,"hard_bounce_rate":0.001,
+		"emails_sent":12345,"scored_recipients":23456,"window_days":30,
+		"insufficient_outcome_data":false,"guardrail_status":"ok","score_version":1}`)
+	d, err := c.Deliverability.Get()
+	require.NoError(t, err)
+	assert.Equal(t, http.MethodGet, rec.Method)
+	assert.Equal(t, "/deliverability", rec.Path)
+	assert.Equal(t, "deliverability", d.Object)
+	require.NotNil(t, d.Score)
+	assert.Equal(t, 8.7, *d.Score)
+	assert.Equal(t, "good", *d.Band)
+	assert.Equal(t, 8.2, *d.ContentScore)
+	assert.Equal(t, 9.1, *d.OutcomeScore)
+	assert.Equal(t, 0.0002, d.ComplaintRate)
+	assert.Equal(t, 0.001, d.HardBounceRate)
+	assert.Equal(t, int64(12345), d.EmailsSent)
+	assert.Equal(t, int64(23456), d.ScoredRecipients)
+	assert.Equal(t, 30, d.WindowDays)
+	assert.False(t, d.InsufficientOutcomeData)
+	assert.Equal(t, "ok", d.GuardrailStatus)
+	assert.Equal(t, 1, d.ScoreVersion)
+}
+
+func TestDeliverabilityGetNullScores(t *testing.T) {
+	c, _ := mockServer(t, 200, `{"object":"deliverability","score":null,"band":null,"content_score":null,"outcome_score":null,"complaint_rate":0,"hard_bounce_rate":0,"emails_sent":0,"scored_recipients":0,"window_days":30,"insufficient_outcome_data":true,"guardrail_status":"ok","score_version":1}`)
+	d, err := c.Deliverability.Get()
+	require.NoError(t, err)
+	assert.Nil(t, d.Score)
+	assert.Nil(t, d.Band)
+	assert.Nil(t, d.ContentScore)
+	assert.Nil(t, d.OutcomeScore)
+	assert.True(t, d.InsufficientOutcomeData)
+}
+
 func TestBatchSend(t *testing.T) {
 	c, rec := mockServer(t, 200, `{"data":[{"id":"1"},{"id":"2"}]}`)
 	res, err := c.Batch.Send([]*SendEmailRequest{

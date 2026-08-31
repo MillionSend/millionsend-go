@@ -33,7 +33,7 @@ import (
 )
 
 // Version is the SDK version, reported in the User-Agent.
-const Version = "0.2.0"
+const Version = "0.3.0"
 
 // MillionSend is self-hosted, so there is no cloud default base URL.
 const defaultBaseURL = "http://localhost:3001"
@@ -54,12 +54,13 @@ type Client struct {
 
 	apiKey string
 
-	Emails     *EmailsService
-	Batch      *BatchService
-	Contacts   *ContactsService
-	Topics     *TopicsService
-	Broadcasts *BroadcastsService
-	Segments   *SegmentsService
+	Emails         *EmailsService
+	Batch          *BatchService
+	Contacts       *ContactsService
+	Topics         *TopicsService
+	Broadcasts     *BroadcastsService
+	Segments       *SegmentsService
+	Deliverability *DeliverabilityService
 }
 
 // NewClient returns a Client authenticating with apiKey. If apiKey is empty it
@@ -85,6 +86,7 @@ func NewClient(apiKey string) *Client {
 	c.Topics = &TopicsService{client: c}
 	c.Broadcasts = &BroadcastsService{client: c}
 	c.Segments = &SegmentsService{client: c}
+	c.Deliverability = &DeliverabilityService{client: c}
 	return c
 }
 

@@ -64,8 +64,8 @@ client.AllowInsecureHTTP = true                          // accept a non-loopbac
   instance elsewhere (e.g. inside a private network).
 
 Every method has a non-context form and, for the transactional hot path,
-`Emails.Send`/`Emails.Get`/`Emails.Cancel` and `Batch.Send` also expose a
-`…WithContext(ctx, …)` variant.
+`Emails.Send`/`Emails.Get`/`Emails.GetInsights`/`Emails.Cancel`, `Batch.Send`
+and `Deliverability.Get` also expose a `…WithContext(ctx, …)` variant.
 
 ## Errors
 
@@ -97,8 +97,9 @@ client-side failure) — the wire's `statusCode: null`.
 
 ```go
 client.Emails.Send(&millionsend.SendEmailRequest{...}, millionsend.WithIdempotencyKey("key"))
-client.Emails.Get(id)
-client.Emails.Cancel(id) // scheduled, unsent emails only
+client.Emails.Get(id)         // includes Score (*float64; nil when no insights)
+client.Emails.GetInsights(id) // per-email deliverability report; 404 until computed
+client.Emails.Cancel(id)      // scheduled, unsent emails only
 
 client.Batch.Send([]*millionsend.SendEmailRequest{a, b}, millionsend.WithIdempotencyKey("key")) // up to 100
 ```
@@ -155,6 +156,20 @@ client.Broadcasts.Update(b.Id, &millionsend.UpdateBroadcastRequest{Subject: "Lau
 client.Broadcasts.Send(b.Id, &millionsend.SendBroadcastRequest{ScheduledAt: "2026-09-01T09:00:00Z"}) // nil to send now
 client.Broadcasts.Cancel(b.Id) // scheduled only
 client.Broadcasts.Remove(b.Id) // draft only
+```
+
+### Deliverability (MillionSend extension)
+
+The account-level deliverability score over the trailing window. Nullable
+scores (`Score`, `Band`, `ContentScore`, `OutcomeScore`) are pointers — nil
+means not enough data yet. Band, check severity/status and guardrail status
+are plain strings: new values may appear without an SDK update.
+
+```go
+d, _ := client.Deliverability.Get()
+if d.Score != nil {
+	fmt.Printf("%.1f (%s)\n", *d.Score, *d.Band)
+}
 ```
 
 ### Segments (MillionSend extension)
