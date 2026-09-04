@@ -230,8 +230,8 @@ func TestContactsUpdateTopics(t *testing.T) {
 
 func TestContactsTopicsList(t *testing.T) {
 	c, rec := mockServer(t, 200, `{"object":"list","has_more":false,"data":[
-		{"id":"t1","name":"Insights","description":null,"subscription":"opt_in","explicit":false},
-		{"id":"t2","name":"Offers","description":"Deals","subscription":"opt_out","explicit":true}]}`)
+		{"id":"t1","name":"Insights","description":null,"subscription":"opt_in","explicit":false,"visibility":"public"},
+		{"id":"t2","name":"Offers","description":"Deals","subscription":"opt_out","explicit":true,"visibility":"private"}]}`)
 	res, err := c.Contacts.Topics.List(ContactAddress{Email: "josé@acme.dev"})
 	require.NoError(t, err)
 	assert.Equal(t, http.MethodGet, rec.Method)
@@ -241,8 +241,8 @@ func TestContactsTopicsList(t *testing.T) {
 	assert.Equal(t, "list", res.Object)
 	assert.False(t, res.HasMore)
 	require.Len(t, res.Data, 2)
-	assert.Equal(t, ContactTopic{Id: "t1", Name: "Insights", Subscription: "opt_in"}, res.Data[0])
-	assert.Equal(t, ContactTopic{Id: "t2", Name: "Offers", Description: "Deals", Subscription: "opt_out", Explicit: true}, res.Data[1])
+	assert.Equal(t, ContactTopic{Id: "t1", Name: "Insights", Subscription: "opt_in", Visibility: "public"}, res.Data[0])
+	assert.Equal(t, ContactTopic{Id: "t2", Name: "Offers", Description: "Deals", Subscription: "opt_out", Explicit: true, Visibility: "private"}, res.Data[1])
 
 	_, err = c.Contacts.Topics.List(ContactAddress{Id: "c1"})
 	require.NoError(t, err)

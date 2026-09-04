@@ -22,16 +22,38 @@ type CreateWebhookResponse struct {
 	SigningSecret string `json:"signing_secret"`
 }
 
-// Webhook is returned by Get (with SigningSecret) and is a List row (without
-// it). Status is "enabled" or "disabled".
+// Webhook is returned by Get (with SigningSecret and PreviousSecretExpiresAt)
+// and is a List row (without them). Status is "enabled" or "disabled".
+// PreviousSecretExpiresAt is set while a rotation's overlap window is open:
+// until then deliveries are also signed with the secret this one replaced.
 type Webhook struct {
-	Object        string   `json:"object"`
-	Id            string   `json:"id"`
-	Endpoint      string   `json:"endpoint"`
-	Events        []string `json:"events"`
-	Status        string   `json:"status"`
-	CreatedAt     string   `json:"created_at"`
-	SigningSecret string   `json:"signing_secret,omitempty"`
+	Object                  string   `json:"object"`
+	Id                      string   `json:"id"`
+	Endpoint                string   `json:"endpoint"`
+	Events                  []string `json:"events"`
+	Status                  string   `json:"status"`
+	CreatedAt               string   `json:"created_at"`
+	SigningSecret           string   `json:"signing_secret,omitempty"`
+	PreviousSecretExpiresAt *string  `json:"previous_secret_expires_at,omitempty"`
+}
+
+// RotateWebhookSecretRequest is the payload for Webhooks.Rotate. SigningSecret
+// supplies the new whsec_ secret instead of minting one. OverlapHours (0–72,
+// default 24) is how long the previous secret keeps signing alongside the new
+// one; every delivery in the window carries both signatures. Ptr(0) drops the
+// old secret at once.
+type RotateWebhookSecretRequest struct {
+	SigningSecret string `json:"signing_secret,omitempty"`
+	OverlapHours  *int   `json:"overlap_hours,omitempty"`
+}
+
+// RotateWebhookSecretResponse is returned by Webhooks.Rotate.
+// PreviousSecretExpiresAt is nil when the old secret was dropped at once.
+type RotateWebhookSecretResponse struct {
+	Object                  string  `json:"object"`
+	Id                      string  `json:"id"`
+	SigningSecret           string  `json:"signing_secret"`
+	PreviousSecretExpiresAt *string `json:"previous_secret_expires_at"`
 }
 
 // UpdateWebhookRequest is the payload for Webhooks.Update; empty fields are
@@ -83,6 +105,17 @@ func (s *WebhooksService) List(opts *ListOptions) (*ListResponse[Webhook], error
 func (s *WebhooksService) Update(id string, params *UpdateWebhookRequest) (*WebhookId, error) {
 	return doJSON[WebhookId](s.client, context.Background(), requestParams{
 		method: http.MethodPatch, path: "/webhooks/" + url.PathEscape(id), body: params,
+	})
+}
+
+// Rotate replaces a webhook's signing secret. Pass nil to mint a secret with
+// the default overlap window.
+func (s *WebhooksService) Rotate(id string, params *RotateWebhookSecretRequest) (*RotateWebhookSecretResponse, error) {
+	if params == nil {
+		params = &RotateWebhookSecretRequest{}
+	}
+	return doJSON[RotateWebhookSecretResponse](s.client, context.Background(), requestParams{
+		method: http.MethodPost, path: "/webhooks/" + url.PathEscape(id) + "/rotate", body: params,
 	})
 }
 

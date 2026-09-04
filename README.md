@@ -64,7 +64,7 @@ client.AllowInsecureHTTP = true                          // accept a non-loopbac
   instance elsewhere (e.g. inside a private network).
 
 Every method has a non-context form. The transactional hot path — every
-`Emails.*` method, `Batch.Send`, `Contacts.Batch.Create`,
+`Emails.*` method, `Batch.Send`, `Contacts.Batch.*`,
 `Suppressions.Batch.*`, `Deliverability.Get` and `Usage.Get` — also exposes a
 `…WithContext(ctx, …)` variant.
 
@@ -197,8 +197,15 @@ client.Contacts.UpdateTopics(
 	[]millionsend.ContactTopicUpdate{{Id: topicID, Subscription: "opt_out"}},
 )
 client.Contacts.Topics.List(millionsend.ContactAddress{Email: "ada@acme.dev"})
-// → Data[i]{Id, Name, Description, Subscription: "opt_in" | "opt_out", Explicit}
+// → Data[i]{Id, Name, Description, Subscription: "opt_in" | "opt_out", Explicit, Visibility}
 //   Subscription is the effective choice; Explicit is false when it is the topic's default
+
+// Preference center (MillionSend extension): the hosted page the unsubscribe
+// links open, for deep-linking from your own settings screen. No expiry and
+// anyone holding it can change that contact's preferences, so hand it only to
+// the contact. 422 when the instance cannot build hosted links.
+link, _ := client.Contacts.CreatePreferencesLink(millionsend.ContactAddress{Email: "ada@acme.dev"})
+// link.Url
 
 // Segment membership
 client.Contacts.Segments.Add(&millionsend.AddContactSegmentRequest{SegmentId: segmentID, ContactId: contactID})
@@ -208,7 +215,7 @@ client.Contacts.Segments.Remove(&millionsend.RemoveContactSegmentRequest{Segment
 `Contact.Properties` is `map[string]ContactPropertyValue{Type, Value}` — the
 typed `{type, value}` objects the API returns.
 
-#### Bulk create (MillionSend extension)
+#### Bulk create and delete (MillionSend extension)
 
 `POST /contacts/batch` writes up to 1000 contacts in one call. `WithOnConflict`
 decides what happens to an email that already exists: `OnConflictError`
@@ -224,6 +231,16 @@ res, err := client.Contacts.Batch.Create([]*millionsend.CreateContactRequest{
 // res.Data[i]  → {Index, Id, Status: "created" | "updated" | "skipped"}
 // res.Counts   → {Created, Updated, Skipped, Failed}
 // res.Errors   → permissive mode only: failed items by index
+```
+
+`POST /contacts/batch/remove` deletes up to 1000 contacts by `Ids` or by
+`Emails` (exactly one of the two; emails match case-insensitively) and lists
+only the rows actually deleted. Each deletion is the same erasure as
+`Contacts.Remove`.
+
+```go
+rm, err := client.Contacts.Batch.Remove(&millionsend.BatchRemoveContactsRequest{Emails: []string{"a@x.dev", "b@x.dev"}})
+// rm.Data[i] → {Object: "contact", Contact: id, Deleted: true}
 ```
 
 ### Contact properties
@@ -305,8 +322,11 @@ a TLS policy and answers `422` rather than dropping it.
 ### Webhooks
 
 Events: `email.sent`, `email.delivered`, `email.delivery_delayed`,
-`email.bounced`, `email.complained`, `email.opened`, `email.clicked`, plus the
-MillionSend extensions `deliverability.warning`, `deliverability.paused`,
+`email.bounced`, `email.complained`, `email.opened`, `email.clicked`,
+`contact.created`, `contact.updated`, `contact.deleted`, plus the MillionSend
+extensions `contact.unsubscribed`, `contact.resubscribed`,
+`contact.topic_opt_in`, `contact.topic_opt_out`, `suppression.added`,
+`suppression.removed`, `deliverability.warning`, `deliverability.paused`,
 `quota.warning`, `quota.reached`, `quota.paused`.
 
 ```go
@@ -315,12 +335,19 @@ w, _ := client.Webhooks.Create(&millionsend.CreateWebhookRequest{
 	Events:   []string{"email.delivered", "email.bounced"},
 }) // w.SigningSecret
 client.Webhooks.List(nil)           // rows never carry the secret
-client.Webhooks.Get(w.Id)           // includes SigningSecret
+client.Webhooks.Get(w.Id)           // includes SigningSecret and PreviousSecretExpiresAt
 client.Webhooks.Update(w.Id, &millionsend.UpdateWebhookRequest{Status: "disabled"})
 client.Webhooks.Remove(w.Id)
+
+// Rotate the secret (MillionSend extension). For OverlapHours (default 24,
+// up to 72) every delivery carries both signatures, so the receiver can
+// switch at any point in the window; Ptr(0) drops the old secret at once.
+r, _ := client.Webhooks.Rotate(w.Id, &millionsend.RotateWebhookSecretRequest{OverlapHours: millionsend.Ptr(48)})
+// r.SigningSecret, r.PreviousSecretExpiresAt (*string; nil once the old secret is gone)
 ```
 
-Pass `SigningSecret` on create to carry over an existing `whsec_…` secret.
+Pass `SigningSecret` on create (or rotate) to carry over an existing `whsec_…`
+secret.
 
 ### API keys
 
@@ -432,8 +459,10 @@ Method names and nesting match (`client.Emails.Send`, `client.Contacts`,
 - **Template sends** (`SendEmailRequest.Template`) are passed through but
   answered with `422`: the API does not render stored templates yet.
 - **Extensions with no Resend counterpart**: `Segments`, `Contacts.Batch`,
-  `Deliverability`, `Usage`, `Emails.GetInsights`, the `unsubscribe`
-  suppression origin, and the `deliverability.*` / `quota.*` webhook events.
+  `Contacts.CreatePreferencesLink`, `Webhooks.Rotate`, `Deliverability`,
+  `Usage`, `Emails.GetInsights`, the `unsubscribe` suppression origin, and
+  the `deliverability.*` / `quota.*` / `suppression.*` webhook events (plus
+  the `contact.*` events beyond Resend's created/updated/deleted).
 
 ## License
 

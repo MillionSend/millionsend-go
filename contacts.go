@@ -123,13 +123,24 @@ type UpdateContactTopicsResponse struct {
 
 // ContactTopic is one row of Contacts.Topics.List. Subscription ("opt_in" |
 // "opt_out") is the contact's effective choice: their own when Explicit is
-// true, otherwise the topic's default.
+// true, otherwise the topic's default. Visibility is "public" or "private";
+// the hosted preference page lists public topics only.
 type ContactTopic struct {
 	Id           string `json:"id"`
 	Name         string `json:"name"`
 	Description  string `json:"description"`
 	Subscription string `json:"subscription"`
 	Explicit     bool   `json:"explicit"`
+	Visibility   string `json:"visibility"`
+}
+
+// ContactPreferencesLink is returned by Contacts.CreatePreferencesLink. Url is
+// the contact's hosted preference page: a signed, contact-scoped capability
+// with no expiry, so hand it only to the contact.
+type ContactPreferencesLink struct {
+	Object  string `json:"object"`
+	Contact string `json:"contact"`
+	Url     string `json:"url"`
 }
 
 // ListContactTopicsResponse is returned by Contacts.Topics.List; a contact's
@@ -161,6 +172,19 @@ type BatchContactsResponse struct {
 	Data   []BatchContactResult `json:"data"`
 	Counts BatchContactsCounts  `json:"counts"`
 	Errors []BatchError         `json:"errors,omitempty"`
+}
+
+// BatchRemoveContactsRequest deletes by Emails or by Ids (exactly one of the
+// two, up to 1000 each). Emails match case-insensitively.
+type BatchRemoveContactsRequest struct {
+	Emails []string `json:"emails,omitempty"`
+	Ids    []string `json:"ids,omitempty"`
+}
+
+// BatchRemoveContactsResponse lists only the rows actually deleted; unknown
+// ids or addresses are skipped.
+type BatchRemoveContactsResponse struct {
+	Data []RemoveContactResponse `json:"data"`
 }
 
 // AddContactSegmentRequest adds the contact (ContactId or Email; Email wins) to
@@ -200,7 +224,7 @@ func contactPath(idOrEmail string) string {
 type ContactsService struct {
 	client *Client
 
-	// Batch covers POST /contacts/batch.
+	// Batch covers POST /contacts/batch and /contacts/batch/remove.
 	Batch *ContactsBatchService
 	// Segments covers the contact ↔ segment membership endpoints.
 	Segments *ContactSegmentsService
@@ -252,8 +276,18 @@ func (s *ContactsService) UpdateTopics(addr ContactAddress, topics []ContactTopi
 	})
 }
 
-// ContactsBatchService covers POST /contacts/batch (a MillionSend extension:
-// Resend imports contacts via CSV only).
+// CreatePreferencesLink mints the contact's hosted preference-center URL, the
+// same page the unsubscribe links in their emails open. 422 when the instance
+// is not configured to build hosted links.
+func (s *ContactsService) CreatePreferencesLink(addr ContactAddress) (*ContactPreferencesLink, error) {
+	return doJSON[ContactPreferencesLink](s.client, context.Background(), requestParams{
+		method: http.MethodPost, path: contactPath(addr.key()) + "/preferences-link",
+	})
+}
+
+// ContactsBatchService covers POST /contacts/batch and /contacts/batch/remove
+// (MillionSend extensions: Resend imports contacts via CSV only and deletes
+// them one at a time).
 type ContactsBatchService struct{ client *Client }
 
 // Create writes 1–1000 contacts in one call. WithOnConflict picks what happens
@@ -277,6 +311,19 @@ func (s *ContactsBatchService) CreateWithContext(ctx context.Context, params []*
 		body:            params,
 		query:           query,
 		batchValidation: cfg.batchValidation,
+	})
+}
+
+// Remove deletes up to 1000 contacts (by email or by id) in one call. Each
+// deletion is the same erasure as Contacts.Remove.
+func (s *ContactsBatchService) Remove(params *BatchRemoveContactsRequest) (*BatchRemoveContactsResponse, error) {
+	return s.RemoveWithContext(context.Background(), params)
+}
+
+// RemoveWithContext is Remove with a caller-supplied context.
+func (s *ContactsBatchService) RemoveWithContext(ctx context.Context, params *BatchRemoveContactsRequest) (*BatchRemoveContactsResponse, error) {
+	return doJSON[BatchRemoveContactsResponse](s.client, ctx, requestParams{
+		method: http.MethodPost, path: "/contacts/batch/remove", body: params,
 	})
 }
 

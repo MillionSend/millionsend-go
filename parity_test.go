@@ -18,7 +18,7 @@ func TestUserAgentCarriesVersion(t *testing.T) {
 	c, rec := mockServer(t, 200, anyOK)
 	_, err := c.Usage.Get()
 	require.NoError(t, err)
-	assert.Equal(t, "millionsend-go/0.5.0", rec.Header.Get("User-Agent"))
+	assert.Equal(t, "millionsend-go/0.6.0", rec.Header.Get("User-Agent"))
 }
 
 func TestSendFullWireBody(t *testing.T) {
@@ -199,6 +199,42 @@ func TestContactsBatchCreate(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, rec.RawQuery)
 	assert.Empty(t, rec.Header.Get("x-batch-validation"))
+}
+
+func TestContactsBatchRemove(t *testing.T) {
+	c, rec := mockServer(t, 200, `{"data":[{"object":"contact","contact":"c1","deleted":true}]}`)
+	rm, err := c.Contacts.Batch.Remove(&BatchRemoveContactsRequest{Ids: []string{"c1", "c2"}})
+	require.NoError(t, err)
+	assert.Equal(t, http.MethodPost, rec.Method)
+	assert.Equal(t, "/contacts/batch/remove", rec.Path)
+	assert.JSONEq(t, `{"ids":["c1","c2"]}`, string(rec.Body))
+	require.Len(t, rm.Data, 1)
+	assert.Equal(t, RemoveContactResponse{Object: "contact", Contact: "c1", Deleted: true}, rm.Data[0])
+
+	_, err = c.Contacts.Batch.RemoveWithContext(context.Background(), &BatchRemoveContactsRequest{Emails: []string{"a@x.dev"}})
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"emails":["a@x.dev"]}`, string(rec.Body))
+}
+
+func TestContactsCreatePreferencesLink(t *testing.T) {
+	c, rec := mockServer(t, 200, `{"object":"preferences_link","contact":"c1","url":"https://app.x.dev/p/tok"}`)
+	link, err := c.Contacts.CreatePreferencesLink(ContactAddress{Email: "ada@x.dev"})
+	require.NoError(t, err)
+	assert.Equal(t, http.MethodPost, rec.Method)
+	assert.Equal(t, "/contacts/ada@x.dev/preferences-link", rec.Path)
+	assert.Empty(t, rec.Body)
+	assert.Equal(t, ContactPreferencesLink{Object: "preferences_link", Contact: "c1", Url: "https://app.x.dev/p/tok"}, *link)
+
+	_, err = c.Contacts.CreatePreferencesLink(ContactAddress{Id: "c1"})
+	require.NoError(t, err)
+	assert.Equal(t, "/contacts/c1/preferences-link", rec.Path)
+
+	c, _ = mockServer(t, 422, `{"statusCode":422,"name":"validation_error","message":"APP_BASE_URL and MASTER_ENCRYPTION_KEY must be set to mint preference links"}`)
+	_, err = c.Contacts.CreatePreferencesLink(ContactAddress{Id: "c1"})
+	var mse *MillionSendError
+	require.ErrorAs(t, err, &mse)
+	assert.Equal(t, 422, mse.StatusCode)
+	assert.Equal(t, "validation_error", mse.Name)
 }
 
 func TestContactsSegmentsAddRemove(t *testing.T) {
@@ -388,12 +424,18 @@ func TestWebhooks(t *testing.T) {
 	assert.JSONEq(t, `{"endpoint":"https://x.dev/hook","events":["email.delivered","email.bounced"],"signing_secret":"whsec_abc"}`, string(rec.Body))
 	assert.Equal(t, "whsec_abc", created.SigningSecret)
 
-	c, rec = mockServer(t, 200, `{"object":"webhook","id":"w1","endpoint":"https://x.dev/hook","created_at":"2026-01-01T00:00:00Z","status":"enabled","events":["email.sent"],"signing_secret":"whsec_abc"}`)
+	c, rec = mockServer(t, 200, `{"object":"webhook","id":"w1","endpoint":"https://x.dev/hook","created_at":"2026-01-01T00:00:00Z","status":"enabled","events":["email.sent"],"signing_secret":"whsec_abc","previous_secret_expires_at":null}`)
 	got, err := c.Webhooks.Get("w1")
 	require.NoError(t, err)
 	assert.Equal(t, "/webhooks/w1", rec.Path)
 	assert.Equal(t, "whsec_abc", got.SigningSecret)
 	assert.Equal(t, []string{"email.sent"}, got.Events)
+	assert.Nil(t, got.PreviousSecretExpiresAt)
+
+	c, rec = mockServer(t, 200, `{"object":"webhook","id":"w1","endpoint":"https://x.dev/hook","created_at":"2026-01-01T00:00:00Z","status":"enabled","events":[],"signing_secret":"whsec_new","previous_secret_expires_at":"2026-01-02T00:00:00Z"}`)
+	got, err = c.Webhooks.Get("w1")
+	require.NoError(t, err)
+	assert.Equal(t, "2026-01-02T00:00:00Z", *got.PreviousSecretExpiresAt)
 
 	_, err = c.Webhooks.Update("w1", &UpdateWebhookRequest{Status: "disabled", Events: []string{"email.opened"}})
 	require.NoError(t, err)
@@ -410,6 +452,28 @@ func TestWebhooks(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "/webhooks", rec.Path)
 	assert.Nil(t, list.Data[0].Events)
+}
+
+func TestWebhooksRotate(t *testing.T) {
+	c, rec := mockServer(t, 200, `{"object":"webhook","id":"w1","signing_secret":"whsec_new","previous_secret_expires_at":"2026-01-02T00:00:00Z"}`)
+	res, err := c.Webhooks.Rotate("w1", nil)
+	require.NoError(t, err)
+	assert.Equal(t, http.MethodPost, rec.Method)
+	assert.Equal(t, "/webhooks/w1/rotate", rec.Path)
+	assert.JSONEq(t, `{}`, string(rec.Body))
+	assert.Equal(t, "whsec_new", res.SigningSecret)
+	assert.Equal(t, "2026-01-02T00:00:00Z", *res.PreviousSecretExpiresAt)
+
+	_, err = c.Webhooks.Rotate("w1", &RotateWebhookSecretRequest{OverlapHours: Ptr(48)})
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"overlap_hours":48}`, string(rec.Body))
+
+	// Zero is a real value (drop the old secret at once), not an omission.
+	c, rec = mockServer(t, 200, `{"object":"webhook","id":"w1","signing_secret":"whsec_mine","previous_secret_expires_at":null}`)
+	res, err = c.Webhooks.Rotate("w1", &RotateWebhookSecretRequest{SigningSecret: "whsec_mine", OverlapHours: Ptr(0)})
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"signing_secret":"whsec_mine","overlap_hours":0}`, string(rec.Body))
+	assert.Nil(t, res.PreviousSecretExpiresAt)
 }
 
 func TestApiKeys(t *testing.T) {
