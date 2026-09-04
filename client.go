@@ -33,7 +33,7 @@ import (
 )
 
 // Version is the SDK version, reported in the User-Agent.
-const Version = "0.3.0"
+const Version = "0.4.0"
 
 // MillionSend is self-hosted, so there is no cloud default base URL.
 const defaultBaseURL = "http://localhost:3001"
@@ -54,13 +54,20 @@ type Client struct {
 
 	apiKey string
 
-	Emails         *EmailsService
-	Batch          *BatchService
-	Contacts       *ContactsService
-	Topics         *TopicsService
-	Broadcasts     *BroadcastsService
-	Segments       *SegmentsService
-	Deliverability *DeliverabilityService
+	Emails            *EmailsService
+	Batch             *BatchService
+	Contacts          *ContactsService
+	ContactProperties *ContactPropertiesService
+	Topics            *TopicsService
+	Broadcasts        *BroadcastsService
+	Segments          *SegmentsService
+	Suppressions      *SuppressionsService
+	Domains           *DomainsService
+	Webhooks          *WebhooksService
+	ApiKeys           *ApiKeysService
+	Templates         *TemplatesService
+	Deliverability    *DeliverabilityService
+	Usage             *UsageService
 }
 
 // NewClient returns a Client authenticating with apiKey. If apiKey is empty it
@@ -82,11 +89,22 @@ func NewClient(apiKey string) *Client {
 	}
 	c.Emails = &EmailsService{client: c}
 	c.Batch = &BatchService{client: c}
-	c.Contacts = &ContactsService{client: c}
+	c.Contacts = &ContactsService{
+		client:   c,
+		Batch:    &ContactsBatchService{client: c},
+		Segments: &ContactSegmentsService{client: c},
+	}
+	c.ContactProperties = &ContactPropertiesService{client: c}
 	c.Topics = &TopicsService{client: c}
 	c.Broadcasts = &BroadcastsService{client: c}
 	c.Segments = &SegmentsService{client: c}
+	c.Suppressions = &SuppressionsService{client: c, Batch: &SuppressionsBatchService{client: c}}
+	c.Domains = &DomainsService{client: c}
+	c.Webhooks = &WebhooksService{client: c}
+	c.ApiKeys = &ApiKeysService{client: c}
+	c.Templates = &TemplatesService{client: c}
 	c.Deliverability = &DeliverabilityService{client: c}
+	c.Usage = &UsageService{client: c}
 	return c
 }
 
@@ -109,17 +127,52 @@ func isInsecureHTTPURL(raw string) bool {
 	return host != "localhost" && host != "::1" && !strings.HasPrefix(host, "127.")
 }
 
-// RequestOption configures a single request. Only Emails.Send and Batch.Send
-// accept these — the idempotency key is POST-only and wired to those two.
+// BatchValidationMode is the x-batch-validation switch of the batch endpoints
+// (Batch.Send, Contacts.Batch.Create).
+type BatchValidationMode string
+
+const (
+	// BatchValidationStrict (the default) rejects the whole batch when any item
+	// is invalid, writing nothing.
+	BatchValidationStrict BatchValidationMode = "strict"
+	// BatchValidationPermissive processes the valid items and lists the failed
+	// ones in the response's Errors.
+	BatchValidationPermissive BatchValidationMode = "permissive"
+)
+
+// OnConflict decides what Contacts.Batch.Create does with an email that already
+// belongs to a contact, and with an email repeated inside the batch.
+type OnConflict string
+
+const (
+	OnConflictError  OnConflict = "error"
+	OnConflictSkip   OnConflict = "skip"
+	OnConflictUpsert OnConflict = "upsert"
+)
+
+// RequestOption configures a single request. The POST endpoints that take
+// options are Emails.Send, Batch.Send and Contacts.Batch.Create.
 type RequestOption func(*requestConfig)
 
 type requestConfig struct {
-	idempotencyKey string
+	idempotencyKey  string
+	batchValidation BatchValidationMode
+	onConflict      OnConflict
 }
 
 // WithIdempotencyKey attaches an Idempotency-Key header to a send.
 func WithIdempotencyKey(key string) RequestOption {
 	return func(c *requestConfig) { c.idempotencyKey = key }
+}
+
+// WithBatchValidation sets the x-batch-validation header on a batch call.
+func WithBatchValidation(mode BatchValidationMode) RequestOption {
+	return func(c *requestConfig) { c.batchValidation = mode }
+}
+
+// WithOnConflict sets the on_conflict query of Contacts.Batch.Create.
+func WithOnConflict(mode OnConflict) RequestOption {
+	return func(c *requestConfig) { c.onConflict = mode }
 }
 
 func buildConfig(opts []RequestOption) requestConfig {
@@ -156,23 +209,48 @@ func (o *ListOptions) values() url.Values {
 }
 
 // ListResponse is the { object, data, has_more } envelope common to the
-// paginated list endpoints (topics are the exception — see TopicListResponse).
+// paginated list endpoints.
 type ListResponse[T any] struct {
 	Object  string `json:"object"`
 	Data    []T    `json:"data"`
 	HasMore bool   `json:"has_more"`
 }
 
+// BatchError is one failed item of a permissive-mode batch (Batch.Send,
+// Contacts.Batch.Create), by position in the request array.
+type BatchError struct {
+	Index   int    `json:"index"`
+	Message string `json:"message"`
+}
+
 // Ptr returns a pointer to v — handy for the optional *string / *bool fields on
 // update requests, e.g. Unsubscribed: millionsend.Ptr(true).
 func Ptr[T any](v T) *T { return &v }
 
+// marshalWithNulls marshals v, then writes an explicit JSON null for each key in
+// nulls: fields a caller cleared, which omitempty would otherwise drop.
+func marshalWithNulls(v any, nulls []string) ([]byte, error) {
+	b, err := json.Marshal(v)
+	if err != nil || len(nulls) == 0 {
+		return b, err
+	}
+	m := map[string]json.RawMessage{}
+	if err := json.Unmarshal(b, &m); err != nil {
+		return nil, err
+	}
+	for _, k := range nulls {
+		m[k] = json.RawMessage("null")
+	}
+	return json.Marshal(m)
+}
+
 type requestParams struct {
-	method         string
-	path           string
-	body           any
-	query          url.Values
-	idempotencyKey string
+	method          string
+	path            string
+	body            any
+	query           url.Values
+	idempotencyKey  string
+	batchValidation BatchValidationMode
 }
 
 func (c *Client) do(ctx context.Context, p requestParams, out any) error {
@@ -211,6 +289,9 @@ func (c *Client) do(ctx context.Context, p requestParams, out any) error {
 	// Idempotency is POST-only on the wire; ignored on any other method.
 	if p.idempotencyKey != "" && p.method == http.MethodPost {
 		req.Header.Set("Idempotency-Key", p.idempotencyKey)
+	}
+	if p.batchValidation != "" {
+		req.Header.Set("x-batch-validation", string(p.batchValidation))
 	}
 
 	resp, err := c.HTTPClient.Do(req)

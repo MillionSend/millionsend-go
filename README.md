@@ -63,9 +63,10 @@ client.AllowInsecureHTTP = true                          // accept a non-loopbac
   key is sent as a bearer header. Set `AllowInsecureHTTP = true` to talk to a non-TLS
   instance elsewhere (e.g. inside a private network).
 
-Every method has a non-context form and, for the transactional hot path,
-`Emails.Send`/`Emails.Get`/`Emails.GetInsights`/`Emails.Cancel`, `Batch.Send`
-and `Deliverability.Get` also expose a `…WithContext(ctx, …)` variant.
+Every method has a non-context form. The transactional hot path — every
+`Emails.*` method, `Batch.Send`, `Contacts.Batch.Create`,
+`Suppressions.Batch.*`, `Deliverability.Get` and `Usage.Get` — also exposes a
+`…WithContext(ctx, …)` variant.
 
 ## Errors
 
@@ -91,21 +92,79 @@ if err != nil {
 `StatusCode` is `0` when the request never reached the API (a transport or
 client-side failure) — the wire's `statusCode: null`.
 
+## Request options
+
+`Emails.Send`, `Batch.Send` and `Contacts.Batch.Create` take functional options:
+
+```go
+client.Emails.Send(req, millionsend.WithIdempotencyKey("order-42"))
+client.Batch.Send(reqs,
+	millionsend.WithIdempotencyKey("run-7"),
+	millionsend.WithBatchValidation(millionsend.BatchValidationPermissive), // x-batch-validation header
+)
+client.Contacts.Batch.Create(contacts, millionsend.WithOnConflict(millionsend.OnConflictUpsert))
+```
+
+resend-go's option structs work too:
+
+```go
+client.Emails.SendWithOptions(ctx, req, &millionsend.SendEmailOptions{IdempotencyKey: "order-42"})
+client.Batch.SendWithOptions(ctx, reqs, &millionsend.BatchSendEmailOptions{
+	IdempotencyKey:  "run-7",
+	BatchValidation: millionsend.BatchValidationPermissive,
+})
+```
+
+Batch validation is `strict` by default (any invalid item rejects the whole
+batch). `permissive` sends the valid items and lists the rest in the
+response's `Errors []BatchError{Index, Message}`.
+
+## Clearing a value with `null`
+
+Update requests use `omitempty`, so an empty field is simply left unchanged.
+Where the API accepts an explicit `null` to erase a stored value, the request
+has a `Clear…` method that puts that `null` on the wire:
+
+```go
+req := &millionsend.UpdateContactRequest{Id: contactID, FirstName: millionsend.Ptr("Ada")}
+req.ClearLastName() // {"first_name":"Ada","last_name":null}
+client.Contacts.Update(req)
+```
+
+Available: `UpdateContactRequest.ClearFirstName/ClearLastName`,
+`UpdateBroadcastRequest.ClearTopicId`, `UpdateTemplateRequest.ClearSubject/ClearText/ClearAlias`,
+`UpdateDomainRequest.ClearTrackingSubdomain`. A `nil` value inside
+`UpdateContactRequest.Properties` removes that key, and a nil
+`UpdateContactPropertyRequest.FallbackValue` clears the fallback.
+
 ## Resources
 
 ### Emails
 
 ```go
-client.Emails.Send(&millionsend.SendEmailRequest{...}, millionsend.WithIdempotencyKey("key"))
+client.Emails.Send(&millionsend.SendEmailRequest{
+	From: "Acme <a@acme.dev>", To: []string{"b@x.dev"}, Subject: "Hi",
+	Html: "<p>Hi</p>", Text: "Hi",
+	Cc: []string{"cc@x.dev"}, Bcc: []string{"bcc@x.dev"}, ReplyTo: "r@acme.dev",
+	ScheduledAt: "in 2 hours",
+	Tags:        []millionsend.Tag{{Name: "campaign", Value: "launch"}},
+	TopicId:     topicID, // recipients opted out of the topic are skipped
+	Headers:     map[string]string{"X-Entity-Ref-ID": "123"},
+	Attachments: []*millionsend.Attachment{{Filename: "hi.txt", Content: []byte("hello"), ContentType: "text/plain"}},
+}, millionsend.WithIdempotencyKey("key"))
 client.Emails.Get(id)         // includes Score (*float64; nil when no insights)
-client.Emails.GetInsights(id) // per-email deliverability report; 404 until computed
+client.Emails.List(&millionsend.ListOptions{Limit: 50})
+client.Emails.Update(&millionsend.UpdateEmailRequest{Id: id, ScheduledAt: "2026-09-10T09:00:00Z"}) // reschedule
 client.Emails.Cancel(id)      // scheduled, unsent emails only
+client.Emails.Remove(id)      // deletes the record and its events
+client.Emails.GetInsights(id) // per-email deliverability report; 404 until computed
 
 client.Batch.Send([]*millionsend.SendEmailRequest{a, b}, millionsend.WithIdempotencyKey("key")) // up to 100
 ```
 
-`To`/`Cc`/`Bcc` are `[]string`; `ReplyTo` and `ScheduledAt` map to `reply_to`
-and `scheduled_at` on the wire.
+`Attachment.Content` is raw bytes; it is base64-encoded on the wire. `Template`
+is passed through unchanged: the API does not support stored-template sends
+yet and answers `422` (send `Html`/`Text` instead).
 
 ### Contacts
 
@@ -116,6 +175,8 @@ Contacts are team-global: one list per team, unique by email
 client.Contacts.Create(&millionsend.CreateContactRequest{
 	Email: "ada@acme.dev", FirstName: "Ada",
 	Properties: map[string]any{"plan": "pro"},
+	Segments:   []millionsend.ContactSegmentRef{{Id: segmentID}},
+	Topics:     []millionsend.ContactTopicUpdate{{Id: topicID, Subscription: "opt_in"}},
 })
 client.Contacts.Get(millionsend.ContactAddress{Email: "ada@acme.dev"}) // id or email (email wins)
 client.Contacts.Update(&millionsend.UpdateContactRequest{
@@ -129,26 +190,66 @@ client.Contacts.UpdateTopics(
 	millionsend.ContactAddress{Email: "ada@acme.dev"},
 	[]millionsend.ContactTopicUpdate{{Id: topicID, Subscription: "opt_out"}},
 )
+
+// Segment membership
+client.Contacts.Segments.Add(&millionsend.AddContactSegmentRequest{SegmentId: segmentID, ContactId: contactID})
+client.Contacts.Segments.Remove(&millionsend.RemoveContactSegmentRequest{SegmentId: segmentID, Email: "ada@acme.dev"})
+```
+
+`Contact.Properties` is `map[string]ContactPropertyValue{Type, Value}` — the
+typed `{type, value}` objects the API returns.
+
+#### Bulk create (MillionSend extension)
+
+`POST /contacts/batch` writes up to 1000 contacts in one call. `WithOnConflict`
+decides what happens to an email that already exists: `OnConflictError`
+(default), `OnConflictSkip` (keep the existing contact, report its id) or
+`OnConflictUpsert` (merge names/properties, add segments and topics). A batch
+never re-subscribes anyone.
+
+```go
+res, err := client.Contacts.Batch.Create([]*millionsend.CreateContactRequest{
+	{Email: "a@x.dev"}, {Email: "b@x.dev", FirstName: "B"},
+}, millionsend.WithOnConflict(millionsend.OnConflictUpsert),
+	millionsend.WithBatchValidation(millionsend.BatchValidationPermissive))
+// res.Data[i]  → {Index, Id, Status: "created" | "updated" | "skipped"}
+// res.Counts   → {Created, Updated, Skipped, Failed}
+// res.Errors   → permissive mode only: failed items by index
+```
+
+### Contact properties
+
+The schema of the custom properties contacts carry. `Type` is `"string"` or
+`"number"`; `FallbackValue` fills merge fields when a contact has no value.
+
+```go
+client.ContactProperties.Create(&millionsend.CreateContactPropertyRequest{Key: "plan", Type: "string", FallbackValue: "free"})
+client.ContactProperties.List(nil)
+client.ContactProperties.Get(id)
+client.ContactProperties.Update(id, &millionsend.UpdateContactPropertyRequest{FallbackValue: "trial"}) // nil clears
+client.ContactProperties.Remove(id)
 ```
 
 ### Topics
 
 ```go
-client.Topics.Create(&millionsend.CreateTopicRequest{Name: "Product updates", DefaultSubscription: "opt_in"})
+client.Topics.Create(&millionsend.CreateTopicRequest{Name: "Product updates", DefaultSubscription: "opt_in", Visibility: "public"})
 client.Topics.Get(id)
-client.Topics.List()   // bare { data } — topics are unpaginated
+client.Topics.List()   // unpaginated: HasMore is always false
+client.Topics.Update(id, &millionsend.UpdateTopicRequest{Description: "Monthly digest"})
 client.Topics.Remove(id)
 ```
 
 ### Broadcasts
 
 Targeting is an optional `SegmentId` and/or `TopicId`; set neither to send to
-all the team's contacts.
+all the team's contacts. `Send: true` sends (or, with `ScheduledAt`, schedules)
+on create instead of saving a draft.
 
 ```go
 b, _ := client.Broadcasts.Create(&millionsend.CreateBroadcastRequest{
 	SegmentId: segmentID, From: "Acme <news@acme.dev>", Subject: "Launch",
-	Html: "<p>Hi {{{FIRST_NAME|there}}}</p>",
+	Html: "<p>Hi {{{FIRST_NAME|there}}}</p>", PreviewText: "It's here",
 })
 client.Broadcasts.List(nil)
 client.Broadcasts.Get(b.Id)
@@ -158,18 +259,84 @@ client.Broadcasts.Cancel(b.Id) // scheduled only
 client.Broadcasts.Remove(b.Id) // draft only
 ```
 
-### Deliverability (MillionSend extension)
+### Suppressions
 
-The account-level deliverability score over the trailing window. Nullable
-scores (`Score`, `Band`, `ContentScore`, `OutcomeScore`) are pointers — nil
-means not enough data yet. Band, check severity/status and guardrail status
-are plain strings: new values may appear without an SDK update.
+The team's do-not-send list. `Origin` is `bounce`, `complaint`, `manual`
+(default) or `unsubscribe` (constants `SuppressionOrigin…`). Adding is
+idempotent: an address already suppressed keeps its entry and origin.
 
 ```go
-d, _ := client.Deliverability.Get()
-if d.Score != nil {
-	fmt.Printf("%.1f (%s)\n", *d.Score, *d.Band)
-}
+client.Suppressions.Add(&millionsend.AddSuppressionRequest{Email: "gone@x.dev"})
+client.Suppressions.Get("gone@x.dev") // id or email
+client.Suppressions.List(&millionsend.ListSuppressionsOptions{Origin: millionsend.SuppressionOriginBounce, Limit: 50})
+client.Suppressions.Remove("gone@x.dev")
+
+client.Suppressions.Batch.Add(&millionsend.BatchAddSuppressionsRequest{Emails: []string{"a@x.dev", "b@x.dev"}}) // up to 1000
+client.Suppressions.Batch.Remove(&millionsend.BatchRemoveSuppressionsRequest{Emails: []string{"a@x.dev"}})     // or Ids
+```
+
+### Domains
+
+```go
+d, _ := client.Domains.Create(&millionsend.CreateDomainRequest{
+	Name: "acme.dev", ClickTracking: millionsend.Ptr(true), TrackingSubdomain: "links",
+})
+for _, r := range d.Records { fmt.Println(r.Record, r.Type, r.Name, r.Value) } // DNS to publish
+client.Domains.List(nil)
+client.Domains.Get(d.Id)
+client.Domains.Verify(d.Id) // re-checks DNS; returns per-record Status
+client.Domains.Update(d.Id, &millionsend.UpdateDomainRequest{OpenTracking: millionsend.Ptr(true)})
+client.Domains.Remove(d.Id)
+```
+
+`Region` must match the deployment's SES region — omit it to use the default.
+
+### Webhooks
+
+Events: `email.sent`, `email.delivered`, `email.delivery_delayed`,
+`email.bounced`, `email.complained`, `email.opened`, `email.clicked`, plus the
+MillionSend extensions `deliverability.warning`, `deliverability.paused`,
+`quota.warning`, `quota.reached`.
+
+```go
+w, _ := client.Webhooks.Create(&millionsend.CreateWebhookRequest{
+	Endpoint: "https://acme.dev/hooks/millionsend",
+	Events:   []string{"email.delivered", "email.bounced"},
+}) // w.SigningSecret
+client.Webhooks.List(nil)           // rows never carry the secret
+client.Webhooks.Get(w.Id)           // includes SigningSecret
+client.Webhooks.Update(w.Id, &millionsend.UpdateWebhookRequest{Status: "disabled"})
+client.Webhooks.Remove(w.Id)
+```
+
+Pass `SigningSecret` on create to carry over an existing `whsec_…` secret.
+
+### API keys
+
+```go
+k, _ := client.ApiKeys.Create(&millionsend.CreateApiKeyRequest{
+	Name: "ci", Permission: "sending_access", DomainId: domainID,
+}) // k.Token is returned only here
+client.ApiKeys.List(nil)
+client.ApiKeys.Remove(k.Id)
+```
+
+### Templates
+
+Every method takes the template id or its alias. Templates have no
+draft/publish cycle — every save is live — so `Publish` is a no-op kept for
+resend-go compatibility.
+
+```go
+t, _ := client.Templates.Create(&millionsend.CreateTemplateRequest{
+	Name: "Welcome", Alias: "welcome", Subject: "Hi {{{FIRST_NAME|there}}}", Html: "<p>Welcome</p>",
+})
+client.Templates.List(nil)
+client.Templates.Get("welcome")
+client.Templates.Update("welcome", &millionsend.UpdateTemplateRequest{Subject: "Hello"})
+client.Templates.Duplicate(t.Id) // "<name> (copy)", no alias
+client.Templates.Publish(t.Id)   // no-op
+client.Templates.Remove(t.Id)
 ```
 
 ### Segments (MillionSend extension)
@@ -187,14 +354,39 @@ client.Segments.Create(&millionsend.CreateSegmentRequest{
 })
 client.Segments.Get(id) // includes a live ContactCount
 client.Segments.List(nil)
+client.Segments.ListContacts(id, &millionsend.ListOptions{Limit: 100})
 client.Segments.Update(id, &millionsend.UpdateSegmentRequest{Name: "Pro tier"})
 client.Segments.Remove(id)
+```
+
+### Deliverability (MillionSend extension)
+
+The account-level deliverability score over the trailing window. Nullable
+scores (`Score`, `Band`, `ContentScore`, `OutcomeScore`) are pointers — nil
+means not enough data yet. Band, check severity/status and guardrail status
+are plain strings: new values may appear without an SDK update.
+
+```go
+d, _ := client.Deliverability.Get()
+if d.Score != nil {
+	fmt.Printf("%.1f (%s)\n", *d.Score, *d.Band)
+}
+```
+
+### Usage (MillionSend extension)
+
+The effective plan, its limits and today's accepted send count. `Plan` and the
+`Limits` are nil on a self-hosted instance.
+
+```go
+u, _ := client.Usage.Get()
+fmt.Println(u.Today.EmailsSent, "sent today; resets", u.Today.ResetsAt)
 ```
 
 ## Migrating from Resend
 
 ```diff
-- import "github.com/resend/resend-go/v2"
+- import "github.com/resend/resend-go/v4"
 - client := resend.NewClient("re_123")
 + import millionsend "github.com/MillionSend/millionsend-go"
 + client := millionsend.NewClient("ms_123")
@@ -202,13 +394,22 @@ client.Segments.Remove(id)
 ```
 
 Method names and nesting match (`client.Emails.Send`, `client.Contacts`,
-`client.Broadcasts`, …). Notes:
+`client.Broadcasts`, `client.Domains`, `client.ApiKeys`, `client.Webhooks`,
+`client.Templates`, `client.Suppressions.Batch`, …). Notes:
 
-- **Domains and API keys** are managed in the MillionSend dashboard, not via the
-  API, so there are no `.Domains`/`.ApiKeys` resources here.
 - **No audiences**: MillionSend contacts are one team-global list. Drop the
   audience id from `.Contacts` calls; target broadcasts with a `.Segments`
-  filter (or a topic) instead.
+  filter (or a topic) instead. The API keeps `/audiences/*` only as a
+  compatibility shim for raw HTTP clients; it is not part of this SDK.
+- **Pagination** is `*ListOptions{Limit, After, Before}` (plain values, not
+  pointers) passed to `List`.
+- **Contacts are addressed** with `ContactAddress{Id | Email}` instead of
+  per-call option structs.
+- **Template sends** (`SendEmailRequest.Template`) are passed through but
+  answered with `422`: the API does not render stored templates yet.
+- **Extensions with no Resend counterpart**: `Segments`, `Contacts.Batch`,
+  `Deliverability`, `Usage`, `Emails.GetInsights`, the `unsubscribe`
+  suppression origin, and the `deliverability.*` / `quota.*` webhook events.
 
 ## License
 

@@ -12,20 +12,49 @@ type Tag struct {
 	Value string `json:"value"`
 }
 
+// Attachment is a file attached to an email. Content travels base64-encoded
+// (encoding/json does that for []byte). Path is sent through unchanged for
+// callers porting from Resend; the API accepts inline content only.
+type Attachment struct {
+	Filename    string `json:"filename"`
+	Content     []byte `json:"content,omitempty"`
+	ContentType string `json:"content_type,omitempty"`
+	ContentId   string `json:"content_id,omitempty"`
+	Path        string `json:"path,omitempty"`
+}
+
+// EmailTemplate selects a stored template for a send, Resend-style. The API
+// does not support it yet: it is sent through so the server answers 422
+// instead of the field being dropped silently.
+type EmailTemplate struct {
+	Id        string         `json:"id"`
+	Variables map[string]any `json:"variables,omitempty"`
+}
+
 // SendEmailRequest is the payload for Emails.Send and each element of a batch.
 // Fields map to the snake_case wire via their json tags; empty optionals are
 // omitted.
 type SendEmailRequest struct {
-	From        string   `json:"from"`
-	To          []string `json:"to"`
-	Subject     string   `json:"subject"`
-	Html        string   `json:"html,omitempty"`
-	Text        string   `json:"text,omitempty"`
-	Cc          []string `json:"cc,omitempty"`
-	Bcc         []string `json:"bcc,omitempty"`
-	ReplyTo     string   `json:"reply_to,omitempty"`
-	ScheduledAt string   `json:"scheduled_at,omitempty"` // ISO 8601, up to 30 days ahead
-	Tags        []Tag    `json:"tags,omitempty"`
+	From        string            `json:"from"`
+	To          []string          `json:"to"`
+	Subject     string            `json:"subject"`
+	Html        string            `json:"html,omitempty"`
+	Text        string            `json:"text,omitempty"`
+	Cc          []string          `json:"cc,omitempty"`
+	Bcc         []string          `json:"bcc,omitempty"`
+	ReplyTo     string            `json:"reply_to,omitempty"`
+	ScheduledAt string            `json:"scheduled_at,omitempty"` // ISO 8601, up to 30 days ahead
+	Tags        []Tag             `json:"tags,omitempty"`
+	TopicId     string            `json:"topic_id,omitempty"`
+	Attachments []*Attachment     `json:"attachments,omitempty"`
+	Headers     map[string]string `json:"headers,omitempty"`
+	Template    *EmailTemplate    `json:"template,omitempty"`
+}
+
+// SendEmailOptions is the resend-go-shaped option struct for
+// Emails.SendWithOptions.
+type SendEmailOptions struct {
+	IdempotencyKey string
 }
 
 // SendEmailResponse is the { id } returned by a send.
@@ -33,7 +62,21 @@ type SendEmailResponse struct {
 	Id string `json:"id"`
 }
 
-// Email is the full record returned by Emails.Get.
+// UpdateEmailRequest is the payload for Emails.Update: reschedule a not-yet-sent
+// email. Id selects the email and is not sent in the body.
+type UpdateEmailRequest struct {
+	Id          string `json:"-"`
+	ScheduledAt string `json:"scheduled_at"`
+}
+
+// UpdateEmailResponse is returned by Emails.Update.
+type UpdateEmailResponse struct {
+	Object string `json:"object"`
+	Id     string `json:"id"`
+}
+
+// Email is the full record returned by Emails.Get; Emails.List rows carry the
+// same fields minus Object, Html, Text, MessageId and Score.
 type Email struct {
 	Object      string   `json:"object"`
 	Id          string   `json:"id"`
@@ -85,12 +128,29 @@ type CancelEmailResponse struct {
 	Id     string `json:"id"`
 }
 
-// BatchSendResponse wraps the ids returned by Batch.Send.
-type BatchSendResponse struct {
-	Data []SendEmailResponse `json:"data"`
+// RemoveEmailResponse is returned by Emails.Remove.
+type RemoveEmailResponse struct {
+	Object  string `json:"object"`
+	Id      string `json:"id"`
+	Deleted bool   `json:"deleted"`
 }
 
-// EmailsService covers POST /emails, GET /emails/:id and the cancel action.
+// BatchSendEmailOptions is the resend-go-shaped option struct for
+// Batch.SendWithOptions.
+type BatchSendEmailOptions struct {
+	IdempotencyKey  string
+	BatchValidation BatchValidationMode
+}
+
+// BatchSendResponse wraps the ids returned by Batch.Send. Errors is populated
+// only in permissive mode, listing the items that were not sent.
+type BatchSendResponse struct {
+	Data   []SendEmailResponse `json:"data"`
+	Errors []BatchError        `json:"errors,omitempty"`
+}
+
+// EmailsService covers POST /emails, GET /emails, GET/PATCH/DELETE /emails/:id
+// and the cancel action.
 type EmailsService struct{ client *Client }
 
 // Send posts a single email. Pass WithIdempotencyKey to make the send idempotent.
@@ -109,6 +169,15 @@ func (s *EmailsService) SendWithContext(ctx context.Context, params *SendEmailRe
 	})
 }
 
+// SendWithOptions is Send in resend-go's shape: options as a struct. nil
+// options sends plainly.
+func (s *EmailsService) SendWithOptions(ctx context.Context, params *SendEmailRequest, options *SendEmailOptions) (*SendEmailResponse, error) {
+	if options == nil {
+		options = &SendEmailOptions{}
+	}
+	return s.SendWithContext(ctx, params, WithIdempotencyKey(options.IdempotencyKey))
+}
+
 // Get fetches an email by id.
 func (s *EmailsService) Get(id string) (*Email, error) {
 	return s.GetWithContext(context.Background(), id)
@@ -119,6 +188,35 @@ func (s *EmailsService) GetWithContext(ctx context.Context, id string) (*Email, 
 	return doJSON[Email](s.client, ctx, requestParams{
 		method: http.MethodGet,
 		path:   "/emails/" + url.PathEscape(id),
+	})
+}
+
+// List returns sent and scheduled emails, newest first, paginated. Pass nil
+// for defaults.
+func (s *EmailsService) List(opts *ListOptions) (*ListResponse[Email], error) {
+	return s.ListWithContext(context.Background(), opts)
+}
+
+// ListWithContext is List with a caller-supplied context.
+func (s *EmailsService) ListWithContext(ctx context.Context, opts *ListOptions) (*ListResponse[Email], error) {
+	return doJSON[ListResponse[Email]](s.client, ctx, requestParams{
+		method: http.MethodGet,
+		path:   "/emails",
+		query:  opts.values(),
+	})
+}
+
+// Update reschedules a not-yet-sent email.
+func (s *EmailsService) Update(params *UpdateEmailRequest) (*UpdateEmailResponse, error) {
+	return s.UpdateWithContext(context.Background(), params)
+}
+
+// UpdateWithContext is Update with a caller-supplied context.
+func (s *EmailsService) UpdateWithContext(ctx context.Context, params *UpdateEmailRequest) (*UpdateEmailResponse, error) {
+	return doJSON[UpdateEmailResponse](s.client, ctx, requestParams{
+		method: http.MethodPatch,
+		path:   "/emails/" + url.PathEscape(params.Id),
+		body:   params,
 	})
 }
 
@@ -150,10 +248,25 @@ func (s *EmailsService) CancelWithContext(ctx context.Context, id string) (*Canc
 	})
 }
 
+// Remove deletes an email record and its events.
+func (s *EmailsService) Remove(id string) (*RemoveEmailResponse, error) {
+	return s.RemoveWithContext(context.Background(), id)
+}
+
+// RemoveWithContext is Remove with a caller-supplied context.
+func (s *EmailsService) RemoveWithContext(ctx context.Context, id string) (*RemoveEmailResponse, error) {
+	return doJSON[RemoveEmailResponse](s.client, ctx, requestParams{
+		method: http.MethodDelete,
+		path:   "/emails/" + url.PathEscape(id),
+	})
+}
+
 // BatchService covers POST /emails/batch.
 type BatchService struct{ client *Client }
 
-// Send posts 1–100 emails in one call. Pass WithIdempotencyKey to make it idempotent.
+// Send posts 1–100 emails in one call. Pass WithIdempotencyKey to make it
+// idempotent and WithBatchValidation(BatchValidationPermissive) to send the
+// valid subset when some items are invalid.
 func (s *BatchService) Send(params []*SendEmailRequest, opts ...RequestOption) (*BatchSendResponse, error) {
 	return s.SendWithContext(context.Background(), params, opts...)
 }
@@ -162,9 +275,22 @@ func (s *BatchService) Send(params []*SendEmailRequest, opts ...RequestOption) (
 func (s *BatchService) SendWithContext(ctx context.Context, params []*SendEmailRequest, opts ...RequestOption) (*BatchSendResponse, error) {
 	cfg := buildConfig(opts)
 	return doJSON[BatchSendResponse](s.client, ctx, requestParams{
-		method:         http.MethodPost,
-		path:           "/emails/batch",
-		body:           params,
-		idempotencyKey: cfg.idempotencyKey,
+		method:          http.MethodPost,
+		path:            "/emails/batch",
+		body:            params,
+		idempotencyKey:  cfg.idempotencyKey,
+		batchValidation: cfg.batchValidation,
 	})
+}
+
+// SendWithOptions is Send in resend-go's shape: options as a struct. nil
+// options sends plainly.
+func (s *BatchService) SendWithOptions(ctx context.Context, params []*SendEmailRequest, options *BatchSendEmailOptions) (*BatchSendResponse, error) {
+	if options == nil {
+		options = &BatchSendEmailOptions{}
+	}
+	return s.SendWithContext(ctx, params,
+		WithIdempotencyKey(options.IdempotencyKey),
+		WithBatchValidation(options.BatchValidation),
+	)
 }

@@ -7,11 +7,19 @@ import (
 )
 
 // CreateTopicRequest is the payload for Topics.Create. DefaultSubscription is
-// "opt_in" or "opt_out".
+// "opt_in" or "opt_out"; Visibility is "private" or "public" (default private).
 type CreateTopicRequest struct {
 	Name                string `json:"name"`
 	Description         string `json:"description,omitempty"`
 	DefaultSubscription string `json:"default_subscription"`
+	Visibility          string `json:"visibility,omitempty"`
+}
+
+// UpdateTopicRequest is the payload for Topics.Update.
+type UpdateTopicRequest struct {
+	Name        string `json:"name,omitempty"`
+	Description string `json:"description,omitempty"`
+	Visibility  string `json:"visibility,omitempty"`
 }
 
 // Topic is returned by Create, Get and List.
@@ -20,10 +28,11 @@ type Topic struct {
 	Name                string `json:"name"`
 	Description         string `json:"description,omitempty"`
 	DefaultSubscription string `json:"default_subscription"`
+	Visibility          string `json:"visibility"`
 	CreatedAt           string `json:"created_at"`
 }
 
-// TopicId is returned by Create.
+// TopicId is returned by Create and Update.
 type TopicId struct {
 	Id string `json:"id"`
 }
@@ -35,10 +44,12 @@ type RemoveTopicResponse struct {
 	Deleted bool   `json:"deleted"`
 }
 
-// TopicListResponse is the bare { data } the API returns for topics; they are
-// unpaginated, so there is no object/has_more envelope.
+// TopicListResponse is returned by Topics.List; topics are unpaginated, so
+// HasMore is always false.
 type TopicListResponse struct {
-	Data []Topic `json:"data"`
+	Object  string  `json:"object"`
+	Data    []Topic `json:"data"`
+	HasMore bool    `json:"has_more"`
 }
 
 // TopicsService covers the /topics CRUD.
@@ -62,6 +73,13 @@ func (s *TopicsService) Get(id string) (*Topic, error) {
 func (s *TopicsService) List() (*TopicListResponse, error) {
 	return doJSON[TopicListResponse](s.client, context.Background(), requestParams{
 		method: http.MethodGet, path: "/topics",
+	})
+}
+
+// Update patches a topic's name, description and/or visibility.
+func (s *TopicsService) Update(id string, params *UpdateTopicRequest) (*TopicId, error) {
+	return doJSON[TopicId](s.client, context.Background(), requestParams{
+		method: http.MethodPatch, path: "/topics/" + url.PathEscape(id), body: params,
 	})
 }
 

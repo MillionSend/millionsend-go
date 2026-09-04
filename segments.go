@@ -88,3 +88,11 @@ func (s *SegmentsService) Remove(id string) (*RemoveSegmentResponse, error) {
 		method: http.MethodDelete, path: "/segments/" + url.PathEscape(id),
 	})
 }
+
+// ListContacts returns the contacts matching a segment, paginated. Pass nil
+// for defaults.
+func (s *SegmentsService) ListContacts(id string, opts *ListOptions) (*ListResponse[ContactListItem], error) {
+	return doJSON[ListResponse[ContactListItem]](s.client, context.Background(), requestParams{
+		method: http.MethodGet, path: "/segments/" + url.PathEscape(id) + "/contacts", query: opts.values(),
+	})
+}

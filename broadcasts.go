@@ -8,27 +8,45 @@ import (
 
 // CreateBroadcastRequest is the payload for Broadcasts.Create. SegmentId and
 // TopicId are optional targeting; neither set sends to all the team's contacts.
+// Send: true sends (or, with ScheduledAt, schedules) immediately instead of
+// saving a draft.
 type CreateBroadcastRequest struct {
-	Name      string `json:"name,omitempty"`
-	SegmentId string `json:"segment_id,omitempty"`
-	From      string `json:"from"`
-	Subject   string `json:"subject"`
-	Html      string `json:"html,omitempty"`
-	Text      string `json:"text,omitempty"`
-	ReplyTo   string `json:"reply_to,omitempty"`
-	TopicId   string `json:"topic_id,omitempty"`
+	Name        string `json:"name,omitempty"`
+	SegmentId   string `json:"segment_id,omitempty"`
+	From        string `json:"from"`
+	Subject     string `json:"subject"`
+	Html        string `json:"html,omitempty"`
+	Text        string `json:"text,omitempty"`
+	ReplyTo     string `json:"reply_to,omitempty"`
+	PreviewText string `json:"preview_text,omitempty"`
+	TopicId     string `json:"topic_id,omitempty"`
+	Send        bool   `json:"send,omitempty"`
+	ScheduledAt string `json:"scheduled_at,omitempty"` // requires Send: true
 }
 
 // UpdateBroadcastRequest is the payload for Broadcasts.Update (draft only).
+// ClearTopicId sends topic_id as null, detaching the topic.
 type UpdateBroadcastRequest struct {
-	Name      string `json:"name,omitempty"`
-	SegmentId string `json:"segment_id,omitempty"`
-	From      string `json:"from,omitempty"`
-	Subject   string `json:"subject,omitempty"`
-	Html      string `json:"html,omitempty"`
-	Text      string `json:"text,omitempty"`
-	ReplyTo   string `json:"reply_to,omitempty"`
-	TopicId   string `json:"topic_id,omitempty"`
+	Name        string `json:"name,omitempty"`
+	SegmentId   string `json:"segment_id,omitempty"`
+	From        string `json:"from,omitempty"`
+	Subject     string `json:"subject,omitempty"`
+	Html        string `json:"html,omitempty"`
+	Text        string `json:"text,omitempty"`
+	ReplyTo     string `json:"reply_to,omitempty"`
+	PreviewText string `json:"preview_text,omitempty"`
+	TopicId     string `json:"topic_id,omitempty"`
+
+	nulls []string
+}
+
+// ClearTopicId sends topic_id as null, so the broadcast no longer targets a topic.
+func (r *UpdateBroadcastRequest) ClearTopicId() { r.nulls = append(r.nulls, "topic_id") }
+
+// MarshalJSON adds the cleared fields as explicit nulls.
+func (r UpdateBroadcastRequest) MarshalJSON() ([]byte, error) {
+	type plain UpdateBroadcastRequest
+	return marshalWithNulls(plain(r), r.nulls)
 }
 
 // SendBroadcastRequest is the payload for Broadcasts.Send. Leave ScheduledAt
@@ -83,7 +101,7 @@ type RemoveBroadcastResponse struct {
 // BroadcastsService covers the /broadcasts lifecycle.
 type BroadcastsService struct{ client *Client }
 
-// Create makes a draft broadcast.
+// Create makes a draft broadcast (or sends it right away with Send: true).
 func (s *BroadcastsService) Create(params *CreateBroadcastRequest) (*BroadcastId, error) {
 	return doJSON[BroadcastId](s.client, context.Background(), requestParams{
 		method: http.MethodPost, path: "/broadcasts", body: params,
