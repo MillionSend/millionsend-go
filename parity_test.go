@@ -18,7 +18,7 @@ func TestUserAgentCarriesVersion(t *testing.T) {
 	c, rec := mockServer(t, 200, anyOK)
 	_, err := c.Usage.Get()
 	require.NoError(t, err)
-	assert.Equal(t, "millionsend-go/0.4.0", rec.Header.Get("User-Agent"))
+	assert.Equal(t, "millionsend-go/0.5.0", rec.Header.Get("User-Agent"))
 }
 
 func TestSendFullWireBody(t *testing.T) {

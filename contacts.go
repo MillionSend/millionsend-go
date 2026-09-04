@@ -121,6 +121,21 @@ type UpdateContactTopicsResponse struct {
 	Id string `json:"id"`
 }
 
+// ContactTopic is one row of Contacts.Topics.List. Subscription ("opt_in" |
+// "opt_out") is the contact's effective choice: their own when Explicit is
+// true, otherwise the topic's default.
+type ContactTopic struct {
+	Id           string `json:"id"`
+	Name         string `json:"name"`
+	Description  string `json:"description"`
+	Subscription string `json:"subscription"`
+	Explicit     bool   `json:"explicit"`
+}
+
+// ListContactTopicsResponse is returned by Contacts.Topics.List; a contact's
+// topics are unpaginated, so HasMore is always false.
+type ListContactTopicsResponse = ListResponse[ContactTopic]
+
 // BatchContactResult is one successful item of Contacts.Batch.Create. Status
 // is "created", "updated" (upsert) or "skipped"; Id is the existing contact's
 // for the latter two.
@@ -189,6 +204,8 @@ type ContactsService struct {
 	Batch *ContactsBatchService
 	// Segments covers the contact ↔ segment membership endpoints.
 	Segments *ContactSegmentsService
+	// Topics covers GET /contacts/{id}/topics.
+	Topics *ContactTopicsService
 }
 
 // Create adds a contact to the team.
@@ -260,6 +277,16 @@ func (s *ContactsBatchService) CreateWithContext(ctx context.Context, params []*
 		body:            params,
 		query:           query,
 		batchValidation: cfg.batchValidation,
+	})
+}
+
+// ContactTopicsService covers GET /contacts/{id}/topics.
+type ContactTopicsService struct{ client *Client }
+
+// List returns every topic with the contact's effective subscription to it.
+func (s *ContactTopicsService) List(addr ContactAddress) (*ListContactTopicsResponse, error) {
+	return doJSON[ListContactTopicsResponse](s.client, context.Background(), requestParams{
+		method: http.MethodGet, path: contactPath(addr.key()) + "/topics",
 	})
 }
 

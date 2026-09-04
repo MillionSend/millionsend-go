@@ -8,7 +8,7 @@ import (
 // MillionSendError is returned for every non-2xx API response and for
 // client-side/transport failures. It implements the error interface, and its
 // Name is a stable, switchable code (e.g. "validation_error", "not_found",
-// "restricted_api_key", "sending_paused").
+// "restricted_api_key", "sending_paused", "all_recipients_suppressed").
 type MillionSendError struct {
 	// StatusCode is the HTTP status. It is 0 when the request never reached the
 	// API (a transport or client-side failure) — the wire's "statusCode: null".

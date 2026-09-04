@@ -2,11 +2,11 @@
 // self-hostable, Resend-compatible email platform.
 //
 // It deliberately mirrors the shape of resend-go, so migrating is close to a
-// find-and-replace: swap the import and constructor, then point Client.BaseURL
-// at your instance.
+// find-and-replace: swap the import and constructor. MillionSend Cloud works
+// with just the API key; a self-hosted instance also sets Client.BaseURL.
 //
 //	client := millionsend.NewClient("ms_123")
-//	client.BaseURL = "https://mail.acme.dev"
+//	client.BaseURL = "https://mail.acme.dev" // self-hosted only
 //	res, err := client.Emails.Send(&millionsend.SendEmailRequest{
 //		From:    "Acme <onboarding@acme.dev>",
 //		To:      []string{"delivered@resend.dev"},
@@ -33,16 +33,16 @@ import (
 )
 
 // Version is the SDK version, reported in the User-Agent.
-const Version = "0.4.0"
+const Version = "0.5.0"
 
-// MillionSend is self-hosted, so there is no cloud default base URL.
-const defaultBaseURL = "http://localhost:3001"
+const defaultBaseURL = "https://api.millionsend.com"
 
 // Client talks to a MillionSend instance. Construct it with NewClient and reuse
 // it; it is safe for concurrent use.
 type Client struct {
-	// BaseURL is the instance URL (a trailing slash is ignored). Exported so it
-	// can be overridden after construction, mirroring resend-go.
+	// BaseURL is the API origin, MillionSend Cloud by default (a trailing slash
+	// is ignored). Exported so it can be overridden after construction,
+	// mirroring resend-go.
 	BaseURL string
 	// HTTPClient performs the requests; defaults to a 30s-timeout client.
 	HTTPClient *http.Client
@@ -72,7 +72,7 @@ type Client struct {
 
 // NewClient returns a Client authenticating with apiKey. If apiKey is empty it
 // falls back to MILLIONSEND_API_KEY. BaseURL falls back to MILLIONSEND_BASE_URL,
-// then http://localhost:3001.
+// then https://api.millionsend.com (MillionSend Cloud).
 func NewClient(apiKey string) *Client {
 	if apiKey == "" {
 		apiKey = os.Getenv("MILLIONSEND_API_KEY")
@@ -93,6 +93,7 @@ func NewClient(apiKey string) *Client {
 		client:   c,
 		Batch:    &ContactsBatchService{client: c},
 		Segments: &ContactSegmentsService{client: c},
+		Topics:   &ContactTopicsService{client: c},
 	}
 	c.ContactProperties = &ContactPropertiesService{client: c}
 	c.Topics = &TopicsService{client: c}

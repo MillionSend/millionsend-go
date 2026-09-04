@@ -228,6 +228,27 @@ func TestContactsUpdateTopics(t *testing.T) {
 	assert.Equal(t, "opt_out", arr[0]["subscription"])
 }
 
+func TestContactsTopicsList(t *testing.T) {
+	c, rec := mockServer(t, 200, `{"object":"list","has_more":false,"data":[
+		{"id":"t1","name":"Insights","description":null,"subscription":"opt_in","explicit":false},
+		{"id":"t2","name":"Offers","description":"Deals","subscription":"opt_out","explicit":true}]}`)
+	res, err := c.Contacts.Topics.List(ContactAddress{Email: "josé@acme.dev"})
+	require.NoError(t, err)
+	assert.Equal(t, http.MethodGet, rec.Method)
+	assert.Equal(t, "/contacts/jos%C3%A9@acme.dev/topics", rec.RequestURI)
+	assert.Equal(t, "/contacts/josé@acme.dev/topics", rec.Path)
+	assert.Empty(t, rec.Body)
+	assert.Equal(t, "list", res.Object)
+	assert.False(t, res.HasMore)
+	require.Len(t, res.Data, 2)
+	assert.Equal(t, ContactTopic{Id: "t1", Name: "Insights", Subscription: "opt_in"}, res.Data[0])
+	assert.Equal(t, ContactTopic{Id: "t2", Name: "Offers", Description: "Deals", Subscription: "opt_out", Explicit: true}, res.Data[1])
+
+	_, err = c.Contacts.Topics.List(ContactAddress{Id: "c1"})
+	require.NoError(t, err)
+	assert.Equal(t, "/contacts/c1/topics", rec.Path)
+}
+
 func TestTopicsCRUD(t *testing.T) {
 	c, rec := mockServer(t, 200, `{"data":[]}`)
 	_, err := c.Topics.Create(&CreateTopicRequest{Name: "Product", DefaultSubscription: "opt_in"})

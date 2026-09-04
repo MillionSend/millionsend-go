@@ -5,8 +5,8 @@ self-hostable, Resend-compatible email API on AWS SES.
 
 The API is wire-compatible with Resend, and this SDK mirrors the shape of
 [`resend-go`](https://github.com/resend/resend-go), so migrating is mostly a
-find-and-replace: swap the import and constructor, then point `BaseURL` at your
-instance.
+find-and-replace: swap the import and constructor. MillionSend Cloud works with
+just the API key; a self-hosted instance also sets `BaseURL`.
 
 ## Install
 
@@ -30,7 +30,7 @@ import (
 
 func main() {
 	client := millionsend.NewClient("ms_123")
-	client.BaseURL = "https://mail.acme.dev" // self-hosted: set this in production
+	// client.BaseURL = "https://mail.acme.dev" // self-hosted instances only
 
 	sent, err := client.Emails.Send(&millionsend.SendEmailRequest{
 		From:    "Acme <onboarding@acme.dev>",
@@ -49,15 +49,15 @@ func main() {
 
 ```go
 client := millionsend.NewClient(apiKey)
-client.BaseURL = "https://mail.acme.dev"        // override the base URL
+client.BaseURL = "https://mail.acme.dev"        // self-hosted instance
 client.HTTPClient = &http.Client{Timeout: time.Minute} // bring your own transport
 client.UserAgent = "myapp/1.0 " + client.UserAgent      // extend the User-Agent
 client.AllowInsecureHTTP = true                          // accept a non-loopback http:// BaseURL
 ```
 
 - `apiKey` falls back to `MILLIONSEND_API_KEY` when empty.
-- `BaseURL` falls back to `MILLIONSEND_BASE_URL`, then `http://localhost:3001`.
-  MillionSend is self-hosted, so **set this to your deployment in production.**
+- `BaseURL` falls back to `MILLIONSEND_BASE_URL`, then `https://api.millionsend.com`
+  (MillionSend Cloud). A self-hosted instance sets its own origin.
 - Plain `http://` is only accepted for loopback hosts (`localhost`, `127.0.0.1`, `::1`);
   any other `http://` URL makes every call return an `application_error`, since the API
   key is sent as a bearer header. Set `AllowInsecureHTTP = true` to talk to a non-TLS
@@ -83,6 +83,8 @@ if err != nil {
 			// …
 		case "validation_error":
 			// …
+		case "all_recipients_suppressed":
+			// nothing was sent: see below
 		}
 		log.Printf("status=%d name=%s: %s", apiErr.StatusCode, apiErr.Name, apiErr.Message)
 	}
@@ -91,6 +93,10 @@ if err != nil {
 
 `StatusCode` is `0` when the request never reached the API (a transport or
 client-side failure) — the wire's `statusCode: null`.
+
+`Emails.Send` and `Batch.Send` answer `422 all_recipients_suppressed` when every
+`To` recipient is on the suppression list or opted out of the send's `TopicId`;
+nothing is sent.
 
 ## Request options
 
@@ -190,6 +196,9 @@ client.Contacts.UpdateTopics(
 	millionsend.ContactAddress{Email: "ada@acme.dev"},
 	[]millionsend.ContactTopicUpdate{{Id: topicID, Subscription: "opt_out"}},
 )
+client.Contacts.Topics.List(millionsend.ContactAddress{Email: "ada@acme.dev"})
+// → Data[i]{Id, Name, Description, Subscription: "opt_in" | "opt_out", Explicit}
+//   Subscription is the effective choice; Explicit is false when it is the topic's default
 
 // Segment membership
 client.Contacts.Segments.Add(&millionsend.AddContactSegmentRequest{SegmentId: segmentID, ContactId: contactID})
@@ -405,7 +414,7 @@ fmt.Println(u.Today.EmailsSent, "sent today; resets", u.Today.ResetsAt)
 - client := resend.NewClient("re_123")
 + import millionsend "github.com/MillionSend/millionsend-go"
 + client := millionsend.NewClient("ms_123")
-+ client.BaseURL = "https://mail.acme.dev"
++ client.BaseURL = "https://mail.acme.dev" // self-hosted only
 ```
 
 Method names and nesting match (`client.Emails.Send`, `client.Contacts`,

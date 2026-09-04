@@ -13,11 +13,12 @@ import (
 )
 
 type capturedRequest struct {
-	Method   string
-	Path     string
-	RawQuery string
-	Header   http.Header
-	Body     []byte
+	Method     string
+	Path       string
+	RequestURI string
+	RawQuery   string
+	Header     http.Header
+	Body       []byte
 }
 
 // mockServer spins up an httptest server that records the last request and
@@ -29,6 +30,7 @@ func mockServer(t *testing.T, status int, respBody string) (*Client, *capturedRe
 		body, _ := io.ReadAll(r.Body)
 		captured.Method = r.Method
 		captured.Path = r.URL.Path
+		captured.RequestURI = r.RequestURI
 		captured.RawQuery = r.URL.RawQuery
 		captured.Header = r.Header.Clone()
 		captured.Body = body
@@ -57,7 +59,15 @@ func sampleEmail() *SendEmailRequest {
 func TestNewClientDefaultsBaseURL(t *testing.T) {
 	t.Setenv("MILLIONSEND_BASE_URL", "")
 	c := NewClient("ms_test")
-	assert.Equal(t, "http://localhost:3001", c.BaseURL)
+	assert.Equal(t, "https://api.millionsend.com", c.BaseURL)
+}
+
+func TestExplicitBaseURLWinsOverEnv(t *testing.T) {
+	t.Setenv("MILLIONSEND_BASE_URL", "https://mail.example.com")
+	c, rec := mockServer(t, 200, `{}`) // mockServer sets BaseURL after NewClient
+	_, err := c.Emails.Get("e1")
+	require.NoError(t, err)
+	assert.Equal(t, "/emails/e1", rec.Path)
 }
 
 func TestNewClientEnvFallback(t *testing.T) {
@@ -177,6 +187,16 @@ func TestErrorParsing(t *testing.T) {
 	assert.Equal(t, 422, mse.StatusCode)
 	assert.Equal(t, "validation_error", mse.Name)
 	assert.Equal(t, "bad", mse.Message)
+}
+
+func TestAllRecipientsSuppressedErrorName(t *testing.T) {
+	c, _ := mockServer(t, 422, `{"statusCode":422,"name":"all_recipients_suppressed","message":"All recipients are suppressed"}`)
+	_, err := c.Emails.Send(sampleEmail())
+	var mse *MillionSendError
+	require.ErrorAs(t, err, &mse)
+	assert.Equal(t, 422, mse.StatusCode)
+	assert.Equal(t, "all_recipients_suppressed", mse.Name)
+	assert.Equal(t, "All recipients are suppressed", mse.Message)
 }
 
 func TestErrorFallbackForNonCanonicalBody(t *testing.T) {

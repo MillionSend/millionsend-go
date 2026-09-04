@@ -12,7 +12,7 @@ import (
 
 // TestE2EContactLifecycle exercises the team-global contact lifecycle against
 // a real MillionSend instance. It runs only when MILLIONSEND_API_KEY is set
-// (and MILLIONSEND_BASE_URL if not localhost:3001); otherwise it skips. No
+// (and MILLIONSEND_BASE_URL for a self-hosted instance); otherwise it skips. No
 // verified sender domain is required.
 func TestE2EContactLifecycle(t *testing.T) {
 	if os.Getenv("MILLIONSEND_API_KEY") == "" {
