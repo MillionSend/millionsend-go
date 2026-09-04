@@ -307,7 +307,7 @@ a TLS policy and answers `422` rather than dropping it.
 Events: `email.sent`, `email.delivered`, `email.delivery_delayed`,
 `email.bounced`, `email.complained`, `email.opened`, `email.clicked`, plus the
 MillionSend extensions `deliverability.warning`, `deliverability.paused`,
-`quota.warning`, `quota.reached`.
+`quota.warning`, `quota.reached`, `quota.paused`.
 
 ```go
 w, _ := client.Webhooks.Create(&millionsend.CreateWebhookRequest{
