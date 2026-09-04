@@ -2,16 +2,18 @@ package millionsend
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/url"
 )
 
-// SegmentCondition is one clause of a segment filter. Value is omitted for ops
-// that do not need one (e.g. "is_set").
+// SegmentCondition is one clause of a segment filter. The wire requires the
+// value key on every condition; presence ops ("is_set", "is_not_set") ignore
+// it, so leave Value empty for those.
 type SegmentCondition struct {
 	Field string `json:"field"`
 	Op    string `json:"op"`
-	Value string `json:"value,omitempty"`
+	Value string `json:"value"`
 }
 
 // SegmentFilter is the rule set a segment evaluates. Match is "all" or "any".
@@ -20,20 +22,45 @@ type SegmentFilter struct {
 	Conditions []SegmentCondition `json:"conditions"`
 }
 
-// CreateSegmentRequest is the payload for Segments.Create.
+// CreateSegmentRequest is the payload for Segments.Create. A zero Filter is
+// omitted, creating a manual segment whose membership comes only from
+// Contacts.Segments.Add and CreateContactRequest.Segments.
 type CreateSegmentRequest struct {
 	Name   string        `json:"name"`
 	Filter SegmentFilter `json:"filter"`
 }
 
-// UpdateSegmentRequest is the payload for Segments.Update.
+// MarshalJSON drops a zero Filter so the API creates a manual segment.
+func (r CreateSegmentRequest) MarshalJSON() ([]byte, error) {
+	if r.Filter.Match == "" && len(r.Filter.Conditions) == 0 {
+		return json.Marshal(struct {
+			Name string `json:"name"`
+		}{r.Name})
+	}
+	type plain CreateSegmentRequest
+	return json.Marshal(plain(r))
+}
+
+// UpdateSegmentRequest is the payload for Segments.Update. ClearFilter sends
+// filter as null, turning the segment manual-membership-only.
 type UpdateSegmentRequest struct {
 	Name   string         `json:"name,omitempty"`
 	Filter *SegmentFilter `json:"filter,omitempty"`
+
+	nulls []string
+}
+
+// ClearFilter sends filter as null, removing the saved filter.
+func (r *UpdateSegmentRequest) ClearFilter() { r.nulls = append(r.nulls, "filter") }
+
+// MarshalJSON adds the cleared fields as explicit nulls.
+func (r UpdateSegmentRequest) MarshalJSON() ([]byte, error) {
+	type plain UpdateSegmentRequest
+	return marshalWithNulls(plain(r), r.nulls)
 }
 
 // Segment is returned by Create, Get, List and Update. Get also populates
-// ContactCount.
+// ContactCount. A manual segment has a zero Filter.
 type Segment struct {
 	Object       string        `json:"object"`
 	Id           string        `json:"id"`

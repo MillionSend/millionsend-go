@@ -6,24 +6,43 @@ import (
 	"net/url"
 )
 
+// TemplateVariable declares a merge variable of a template, Resend-style.
+// Type is "string" or "number".
+type TemplateVariable struct {
+	Key           string `json:"key"`
+	Type          string `json:"type"`
+	FallbackValue any    `json:"fallback_value,omitempty"`
+}
+
 // CreateTemplateRequest is the payload for Templates.Create. Alias is a
 // case-sensitive handle, unique per team, usable in place of the id.
+//
+// From, ReplyTo and Variables are not supported by the API yet: they are sent
+// through so the server answers 422 instead of the value being dropped
+// silently. ReplyTo is a string or a []string.
 type CreateTemplateRequest struct {
-	Name    string `json:"name"`
-	Html    string `json:"html"`
-	Subject string `json:"subject,omitempty"`
-	Text    string `json:"text,omitempty"`
-	Alias   string `json:"alias,omitempty"`
+	Name      string              `json:"name"`
+	Html      string              `json:"html"`
+	Subject   string              `json:"subject,omitempty"`
+	Text      string              `json:"text,omitempty"`
+	Alias     string              `json:"alias,omitempty"`
+	From      string              `json:"from,omitempty"`
+	ReplyTo   any                 `json:"reply_to,omitempty"`
+	Variables []*TemplateVariable `json:"variables,omitempty"`
 }
 
 // UpdateTemplateRequest is the payload for Templates.Update; empty fields are
-// left unchanged. ClearSubject/ClearText/ClearAlias send null, erasing the value.
+// left unchanged. ClearSubject/ClearText/ClearAlias send null, erasing the
+// value. From, ReplyTo and Variables pass through as on create (422).
 type UpdateTemplateRequest struct {
-	Name    string `json:"name,omitempty"`
-	Html    string `json:"html,omitempty"`
-	Subject string `json:"subject,omitempty"`
-	Text    string `json:"text,omitempty"`
-	Alias   string `json:"alias,omitempty"`
+	Name      string              `json:"name,omitempty"`
+	Html      string              `json:"html,omitempty"`
+	Subject   string              `json:"subject,omitempty"`
+	Text      string              `json:"text,omitempty"`
+	Alias     string              `json:"alias,omitempty"`
+	From      string              `json:"from,omitempty"`
+	ReplyTo   any                 `json:"reply_to,omitempty"`
+	Variables []*TemplateVariable `json:"variables,omitempty"`
 
 	nulls []string
 }
@@ -51,20 +70,24 @@ type TemplateId struct {
 
 // Template is returned by Get and is a List row (rows carry the metadata
 // fields only). Templates have no draft/publish cycle — every save is live —
-// so Status is always "published".
+// so Status is always "published". From, ReplyTo and Variables read as "",
+// nil and empty until the API supports them.
 type Template struct {
-	Object           string `json:"object"`
-	Id               string `json:"id"`
-	Name             string `json:"name"`
-	Alias            string `json:"alias"`
-	Status           string `json:"status"`
-	PublishedAt      string `json:"published_at"`
-	CreatedAt        string `json:"created_at"`
-	UpdatedAt        string `json:"updated_at"`
-	CurrentVersionId string `json:"current_version_id"`
-	Subject          string `json:"subject"`
-	Html             string `json:"html"`
-	Text             string `json:"text"`
+	Object           string              `json:"object"`
+	Id               string              `json:"id"`
+	Name             string              `json:"name"`
+	Alias            string              `json:"alias"`
+	Status           string              `json:"status"`
+	PublishedAt      string              `json:"published_at"`
+	CreatedAt        string              `json:"created_at"`
+	UpdatedAt        string              `json:"updated_at"`
+	CurrentVersionId string              `json:"current_version_id"`
+	From             string              `json:"from"`
+	Subject          string              `json:"subject"`
+	ReplyTo          any                 `json:"reply_to"`
+	Html             string              `json:"html"`
+	Text             string              `json:"text"`
+	Variables        []*TemplateVariable `json:"variables"`
 }
 
 // RemoveTemplateResponse is returned by Templates.Remove.

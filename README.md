@@ -133,7 +133,7 @@ client.Contacts.Update(req)
 
 Available: `UpdateContactRequest.ClearFirstName/ClearLastName`,
 `UpdateBroadcastRequest.ClearTopicId`, `UpdateTemplateRequest.ClearSubject/ClearText/ClearAlias`,
-`UpdateDomainRequest.ClearTrackingSubdomain`. A `nil` value inside
+`UpdateDomainRequest.ClearTrackingSubdomain`, `UpdateSegmentRequest.ClearFilter`. A `nil` value inside
 `UpdateContactRequest.Properties` removes that key, and a nil
 `UpdateContactPropertyRequest.FallbackValue` clears the fallback.
 
@@ -290,6 +290,8 @@ client.Domains.Remove(d.Id)
 ```
 
 `Region` must match the deployment's SES region — omit it to use the default.
+`UpdateDomainRequest.Tls` is passed through unchanged: the API does not expose
+a TLS policy and answers `422` rather than dropping it.
 
 ### Webhooks
 
@@ -339,25 +341,38 @@ client.Templates.Publish(t.Id)   // no-op
 client.Templates.Remove(t.Id)
 ```
 
+`From`, `ReplyTo` and `Variables` are accepted for resend-go compatibility and
+passed through unchanged; the API does not support them yet and answers `422`
+(they read back as `""`, `nil` and empty).
+
 ### Segments (MillionSend extension)
 
 Segments are a saved filter over the team's contacts — a MillionSend superset
-with no Resend equivalent (served at `/segments`).
+with no Resend equivalent (served at `/segments`). Omit `Filter` to create a
+manual segment, whose members come only from `Contacts.Segments.Add` and
+`CreateContactRequest.Segments`.
 
 ```go
 client.Segments.Create(&millionsend.CreateSegmentRequest{
 	Name: "Pro plan",
 	Filter: millionsend.SegmentFilter{
-		Match:      "all",
-		Conditions: []millionsend.SegmentCondition{{Field: "property:plan", Op: "equals", Value: "pro"}},
+		Match: "all",
+		Conditions: []millionsend.SegmentCondition{
+			{Field: "property:plan", Op: "equals", Value: "pro"},
+			{Field: "first_name", Op: "is_set"}, // presence ops ignore Value
+		},
 	},
 })
+client.Segments.Create(&millionsend.CreateSegmentRequest{Name: "VIPs"}) // manual segment
 client.Segments.Get(id) // includes a live ContactCount
 client.Segments.List(nil)
 client.Segments.ListContacts(id, &millionsend.ListOptions{Limit: 100})
 client.Segments.Update(id, &millionsend.UpdateSegmentRequest{Name: "Pro tier"})
 client.Segments.Remove(id)
 ```
+
+`UpdateSegmentRequest.ClearFilter()` sends `filter: null`, turning a filtered
+segment into a manual one.
 
 ### Deliverability (MillionSend extension)
 

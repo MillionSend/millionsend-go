@@ -561,3 +561,56 @@ func TestClearedRequestsHaveNoStrayKeys(t *testing.T) {
 	require.NoError(t, json.Unmarshal(b, &m))
 	assert.Equal(t, map[string]any{"html": "<p/>", "text": nil}, m)
 }
+
+func TestSegmentsManualFilterAndClear(t *testing.T) {
+	c, rec := mockServer(t, 200, `{"object":"segment","id":"s1","name":"Manual","filter":null,"created_at":"2026-01-01T00:00:00Z"}`)
+	seg, err := c.Segments.Create(&CreateSegmentRequest{Name: "Manual"})
+	require.NoError(t, err)
+	assert.Equal(t, http.MethodPost, rec.Method)
+	assert.Equal(t, "/segments", rec.Path)
+	assert.JSONEq(t, `{"name":"Manual"}`, string(rec.Body))
+	assert.Equal(t, SegmentFilter{}, seg.Filter)
+
+	// The value key is required on the wire, presence ops included.
+	_, err = c.Segments.Create(&CreateSegmentRequest{Name: "Pro", Filter: SegmentFilter{
+		Match:      "all",
+		Conditions: []SegmentCondition{{Field: "property:plan", Op: "equals", Value: "pro"}, {Field: "first_name", Op: "is_set"}},
+	}})
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"name":"Pro","filter":{"match":"all","conditions":[
+		{"field":"property:plan","op":"equals","value":"pro"},
+		{"field":"first_name","op":"is_set","value":""}]}}`, string(rec.Body))
+
+	upd := &UpdateSegmentRequest{Name: "Renamed"}
+	upd.ClearFilter()
+	_, err = c.Segments.Update("s1", upd)
+	require.NoError(t, err)
+	assert.Equal(t, http.MethodPatch, rec.Method)
+	assert.Equal(t, "/segments/s1", rec.Path)
+	assert.JSONEq(t, `{"name":"Renamed","filter":null}`, string(rec.Body))
+
+	_, err = c.Segments.Update("s1", &UpdateSegmentRequest{Filter: &SegmentFilter{Match: "any", Conditions: []SegmentCondition{{Field: "email", Op: "ends_with", Value: "@x.dev"}}}})
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"filter":{"match":"any","conditions":[{"field":"email","op":"ends_with","value":"@x.dev"}]}}`, string(rec.Body))
+}
+
+// Fields the API declares only to answer 422 must still reach the wire.
+func TestUnsupportedFieldsPassThrough(t *testing.T) {
+	c, rec := mockServer(t, 200, `{"object":"template","id":"tp1"}`)
+	_, err := c.Templates.Create(&CreateTemplateRequest{
+		Name: "Welcome", Html: "<p>{{{NAME}}}</p>", From: "Acme <a@x.dev>", ReplyTo: []string{"r@x.dev"},
+		Variables: []*TemplateVariable{{Key: "NAME", Type: "string", FallbackValue: "there"}},
+	})
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"name":"Welcome","html":"<p>{{{NAME}}}</p>","from":"Acme <a@x.dev>","reply_to":["r@x.dev"],
+		"variables":[{"key":"NAME","type":"string","fallback_value":"there"}]}`, string(rec.Body))
+
+	_, err = c.Templates.Update("tp1", &UpdateTemplateRequest{ReplyTo: "r@x.dev", Variables: []*TemplateVariable{{Key: "N", Type: "number"}}})
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"reply_to":"r@x.dev","variables":[{"key":"N","type":"number"}]}`, string(rec.Body))
+
+	c, rec = mockServer(t, 200, anyOK)
+	_, err = c.Domains.Update("d1", &UpdateDomainRequest{Tls: "enforced", OpenTracking: Ptr(true)})
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"tls":"enforced","open_tracking":true}`, string(rec.Body))
+}
