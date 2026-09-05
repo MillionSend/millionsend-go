@@ -117,9 +117,9 @@ func (s *SegmentsService) Remove(id string) (*RemoveSegmentResponse, error) {
 }
 
 // ListContacts returns the contacts matching a segment, paginated. Pass nil
-// for defaults.
-func (s *SegmentsService) ListContacts(id string, opts *ListOptions) (*ListResponse[ContactListItem], error) {
+// for defaults; WithInclude attaches Properties and/or Topics to every item.
+func (s *SegmentsService) ListContacts(id string, opts *ListOptions, ropts ...RequestOption) (*ListResponse[ContactListItem], error) {
 	return doJSON[ListResponse[ContactListItem]](s.client, context.Background(), requestParams{
-		method: http.MethodGet, path: "/segments/" + url.PathEscape(id) + "/contacts", query: opts.values(),
+		method: http.MethodGet, path: "/segments/" + url.PathEscape(id) + "/contacts", query: contactListQuery(opts, ropts),
 	})
 }

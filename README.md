@@ -100,7 +100,8 @@ nothing is sent.
 
 ## Request options
 
-`Emails.Send`, `Batch.Send` and `Contacts.Batch.Create` take functional options:
+`Emails.Send`, `Batch.Send`, `Contacts.Batch.Create`, `Contacts.Batch.Get`,
+`Contacts.List` and `Segments.ListContacts` take functional options:
 
 ```go
 client.Emails.Send(req, millionsend.WithIdempotencyKey("order-42"))
@@ -109,6 +110,7 @@ client.Batch.Send(reqs,
 	millionsend.WithBatchValidation(millionsend.BatchValidationPermissive), // x-batch-validation header
 )
 client.Contacts.Batch.Create(contacts, millionsend.WithOnConflict(millionsend.OnConflictUpsert))
+client.Contacts.List(nil, millionsend.WithInclude(millionsend.ContactIncludeTopics)) // ?include=topics
 ```
 
 resend-go's option structs work too:
@@ -190,6 +192,13 @@ client.Contacts.Update(&millionsend.UpdateContactRequest{
 }) // nil fields are left unchanged
 client.Contacts.Remove(millionsend.ContactAddress{Email: "ada@acme.dev"})
 client.Contacts.List(&millionsend.ListOptions{Limit: 50})
+// Bulk read (MillionSend extension): attach the property map and the topic
+// subscriptions to every item, so an audience reads in one request per 100
+// contacts instead of one per contact. Segments.ListContacts takes it too.
+client.Contacts.List(&millionsend.ListOptions{Limit: 100},
+	millionsend.WithInclude(millionsend.ContactIncludeProperties, millionsend.ContactIncludeTopics))
+// → Data[i].Properties (map[string]ContactPropertyValue) and Data[i].Topics ([]ContactTopic);
+//   nil without the facet
 
 // Topic subscriptions (granular unsubscribe)
 client.Contacts.UpdateTopics(
@@ -215,7 +224,7 @@ client.Contacts.Segments.Remove(&millionsend.RemoveContactSegmentRequest{Segment
 `Contact.Properties` is `map[string]ContactPropertyValue{Type, Value}` — the
 typed `{type, value}` objects the API returns.
 
-#### Bulk create and delete (MillionSend extension)
+#### Bulk create, read and delete (MillionSend extension)
 
 `POST /contacts/batch` writes up to 1000 contacts in one call. `WithOnConflict`
 decides what happens to an email that already exists: `OnConflictError`
@@ -231,6 +240,18 @@ res, err := client.Contacts.Batch.Create([]*millionsend.CreateContactRequest{
 // res.Data[i]  → {Index, Id, Status: "created" | "updated" | "skipped"}
 // res.Counts   → {Created, Updated, Skipped, Failed}
 // res.Errors   → permissive mode only: failed items by index
+```
+
+`POST /contacts/batch/get` reads up to 1000 contacts by id or email in one
+call (one request against the rate limit), in request order. Entries that
+match no contact are listed in `Missing` instead of failing the call;
+`WithInclude` attaches `Properties` and/or `Topics` to each contact.
+
+```go
+res, err := client.Contacts.Batch.Get([]millionsend.ContactAddress{{Id: contactID}, {Email: "b@x.dev"}},
+	millionsend.WithInclude(millionsend.ContactIncludeTopics))
+// res.Data[i]    → {Object: "contact", Id, Email, FirstName, LastName, CreatedAt, Unsubscribed, Topics}
+// res.Missing[i] → {Index, Id | Email}: request entries that matched nobody
 ```
 
 `POST /contacts/batch/remove` deletes up to 1000 contacts by `Ids` or by
@@ -402,7 +423,7 @@ client.Segments.Create(&millionsend.CreateSegmentRequest{
 client.Segments.Create(&millionsend.CreateSegmentRequest{Name: "VIPs"}) // manual segment
 client.Segments.Get(id) // includes a live ContactCount
 client.Segments.List(nil)
-client.Segments.ListContacts(id, &millionsend.ListOptions{Limit: 100})
+client.Segments.ListContacts(id, &millionsend.ListOptions{Limit: 100}) // takes WithInclude like Contacts.List
 client.Segments.Update(id, &millionsend.UpdateSegmentRequest{Name: "Pro tier"})
 client.Segments.Remove(id)
 ```

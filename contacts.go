@@ -2,8 +2,10 @@ package millionsend
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/url"
+	"strings"
 )
 
 // ContactAddress identifies a contact by Id or Email (Email wins if both are
@@ -18,6 +20,19 @@ func (a ContactAddress) key() string {
 		return a.Email
 	}
 	return a.Id
+}
+
+// MarshalJSON writes the entry shape Contacts.Batch.Get posts: {"email": …}
+// when Email is set, otherwise {"id": …}.
+func (a ContactAddress) MarshalJSON() ([]byte, error) {
+	if a.Email != "" {
+		return json.Marshal(struct {
+			Email string `json:"email"`
+		}{a.Email})
+	}
+	return json.Marshal(struct {
+		Id string `json:"id"`
+	}{a.Id})
 }
 
 // ContactSegmentRef names a segment to add a contact to on creation.
@@ -100,6 +115,11 @@ type ContactListItem struct {
 	LastName     string `json:"last_name"`
 	CreatedAt    string `json:"created_at"`
 	Unsubscribed bool   `json:"unsubscribed"`
+	// Properties and Topics are present only when the call passed
+	// WithInclude(ContactIncludeProperties) / WithInclude(ContactIncludeTopics):
+	// the same shapes Contacts.Get and Contacts.Topics.List return.
+	Properties map[string]ContactPropertyValue `json:"properties,omitempty"`
+	Topics     []ContactTopic                  `json:"topics,omitempty"`
 }
 
 // RemoveContactResponse is returned by Contacts.Remove.
@@ -187,6 +207,34 @@ type BatchRemoveContactsResponse struct {
 	Data []RemoveContactResponse `json:"data"`
 }
 
+type batchGetContactsRequest struct {
+	Contacts []ContactAddress `json:"contacts"`
+	Include  []ContactInclude `json:"include,omitempty"`
+}
+
+// BatchGetContact is one contact as Contacts.Batch.Get returns it: the list
+// item plus Object ("contact"), with the facets WithInclude asked for.
+type BatchGetContact struct {
+	ContactListItem
+	Object string `json:"object"`
+}
+
+// BatchGetMissingContact is a Contacts.Batch.Get entry that matched no
+// contact, by its position in the request; Id or Email echoes the entry.
+type BatchGetMissingContact struct {
+	Index int    `json:"index"`
+	Id    string `json:"id,omitempty"`
+	Email string `json:"email,omitempty"`
+}
+
+// BatchGetContactsResponse is returned by Contacts.Batch.Get: Data holds the
+// contacts found, in request order; Missing the entries that matched nobody.
+type BatchGetContactsResponse struct {
+	Object  string                   `json:"object"`
+	Data    []BatchGetContact        `json:"data"`
+	Missing []BatchGetMissingContact `json:"missing"`
+}
+
 // AddContactSegmentRequest adds the contact (ContactId or Email; Email wins) to
 // SegmentId.
 type AddContactSegmentRequest struct {
@@ -220,11 +268,29 @@ func contactPath(idOrEmail string) string {
 	return "/contacts/" + url.PathEscape(idOrEmail)
 }
 
+// contactListQuery is the pagination query plus the include facets of
+// WithInclude, shared by Contacts.List and Segments.ListContacts.
+func contactListQuery(opts *ListOptions, ropts []RequestOption) url.Values {
+	q := opts.values()
+	if inc := buildConfig(ropts).include; len(inc) > 0 {
+		parts := make([]string, len(inc))
+		for i, f := range inc {
+			parts[i] = string(f)
+		}
+		if q == nil {
+			q = url.Values{}
+		}
+		q.Set("include", strings.Join(parts, ","))
+	}
+	return q
+}
+
 // ContactsService covers the team-global /contacts endpoints.
 type ContactsService struct {
 	client *Client
 
-	// Batch covers POST /contacts/batch and /contacts/batch/remove.
+	// Batch covers POST /contacts/batch, /contacts/batch/get and
+	// /contacts/batch/remove.
 	Batch *ContactsBatchService
 	// Segments covers the contact ↔ segment membership endpoints.
 	Segments *ContactSegmentsService
@@ -261,10 +327,11 @@ func (s *ContactsService) Remove(addr ContactAddress) (*RemoveContactResponse, e
 	})
 }
 
-// List returns the team's contacts, paginated. Pass nil for defaults.
-func (s *ContactsService) List(opts *ListOptions) (*ListResponse[ContactListItem], error) {
+// List returns the team's contacts, paginated. Pass nil for defaults;
+// WithInclude attaches Properties and/or Topics to every item.
+func (s *ContactsService) List(opts *ListOptions, ropts ...RequestOption) (*ListResponse[ContactListItem], error) {
 	return doJSON[ListResponse[ContactListItem]](s.client, context.Background(), requestParams{
-		method: http.MethodGet, path: "/contacts", query: opts.values(),
+		method: http.MethodGet, path: "/contacts", query: contactListQuery(opts, ropts),
 	})
 }
 
@@ -285,9 +352,9 @@ func (s *ContactsService) CreatePreferencesLink(addr ContactAddress) (*ContactPr
 	})
 }
 
-// ContactsBatchService covers POST /contacts/batch and /contacts/batch/remove
-// (MillionSend extensions: Resend imports contacts via CSV only and deletes
-// them one at a time).
+// ContactsBatchService covers POST /contacts/batch, /contacts/batch/get and
+// /contacts/batch/remove (MillionSend extensions: Resend imports contacts via
+// CSV only and reads and deletes them one at a time).
 type ContactsBatchService struct{ client *Client }
 
 // Create writes 1–1000 contacts in one call. WithOnConflict picks what happens
@@ -311,6 +378,22 @@ func (s *ContactsBatchService) CreateWithContext(ctx context.Context, params []*
 		body:            params,
 		query:           query,
 		batchValidation: cfg.batchValidation,
+	})
+}
+
+// Get reads up to 1000 contacts (by id or by email) in one call, in request
+// order. Entries that match no contact are listed in Missing instead of
+// failing the call; WithInclude attaches Properties and/or Topics to each
+// contact. One call counts as one request against the rate limit.
+func (s *ContactsBatchService) Get(addrs []ContactAddress, opts ...RequestOption) (*BatchGetContactsResponse, error) {
+	return s.GetWithContext(context.Background(), addrs, opts...)
+}
+
+// GetWithContext is Get with a caller-supplied context.
+func (s *ContactsBatchService) GetWithContext(ctx context.Context, addrs []ContactAddress, opts ...RequestOption) (*BatchGetContactsResponse, error) {
+	return doJSON[BatchGetContactsResponse](s.client, ctx, requestParams{
+		method: http.MethodPost, path: "/contacts/batch/get",
+		body: batchGetContactsRequest{Contacts: addrs, Include: buildConfig(opts).include},
 	})
 }
 

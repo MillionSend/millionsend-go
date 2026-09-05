@@ -18,7 +18,7 @@ func TestUserAgentCarriesVersion(t *testing.T) {
 	c, rec := mockServer(t, 200, anyOK)
 	_, err := c.Usage.Get()
 	require.NoError(t, err)
-	assert.Equal(t, "millionsend-go/0.6.0", rec.Header.Get("User-Agent"))
+	assert.Equal(t, "millionsend-go/0.7.0", rec.Header.Get("User-Agent"))
 }
 
 func TestSendFullWireBody(t *testing.T) {
@@ -216,6 +216,61 @@ func TestContactsBatchRemove(t *testing.T) {
 	assert.JSONEq(t, `{"emails":["a@x.dev"]}`, string(rec.Body))
 }
 
+func TestContactsListInclude(t *testing.T) {
+	c, rec := mockServer(t, 200, `{"object":"list","has_more":false,"data":[
+		{"id":"c1","email":"a@x.dev","first_name":"A","last_name":"","created_at":"2026-01-01T00:00:00Z","unsubscribed":false,
+		 "properties":{"plan":{"type":"string","value":"pro"},"seats":{"type":"number","value":3}},
+		 "topics":[{"id":"t1","name":"News","description":null,"subscription":"opt_in","explicit":false,"visibility":"public"}]}]}`)
+	res, err := c.Contacts.List(&ListOptions{Limit: 100}, WithInclude(ContactIncludeProperties, ContactIncludeTopics))
+	require.NoError(t, err)
+	assert.Equal(t, http.MethodGet, rec.Method)
+	assert.Equal(t, "/contacts", rec.Path)
+	assert.Equal(t, "include=properties%2Ctopics&limit=100", rec.RawQuery)
+	require.Len(t, res.Data, 1)
+	assert.Equal(t, map[string]ContactPropertyValue{
+		"plan":  {Type: "string", Value: "pro"},
+		"seats": {Type: "number", Value: float64(3)},
+	}, res.Data[0].Properties)
+	assert.Equal(t, []ContactTopic{{Id: "t1", Name: "News", Subscription: "opt_in", Visibility: "public"}}, res.Data[0].Topics)
+
+	// The facet rides alone when there are no pagination options.
+	_, err = c.Contacts.List(nil, WithInclude(ContactIncludeTopics))
+	require.NoError(t, err)
+	assert.Equal(t, "include=topics", rec.RawQuery)
+
+	// Without WithInclude the query is the plain pagination.
+	_, err = c.Contacts.List(&ListOptions{Limit: 100})
+	require.NoError(t, err)
+	assert.Equal(t, "limit=100", rec.RawQuery)
+}
+
+func TestContactsBatchGet(t *testing.T) {
+	c, rec := mockServer(t, 200, `{"object":"list","data":[
+		{"object":"contact","id":"c1","email":"a@x.dev","first_name":"A","last_name":"","created_at":"2026-01-01T00:00:00Z","unsubscribed":false,
+		 "properties":{"plan":{"type":"string","value":"pro"}},"topics":[]}],
+		"missing":[{"index":1,"email":"b@x.dev"},{"index":2,"id":"c3"}]}`)
+	res, err := c.Contacts.Batch.Get([]ContactAddress{{Id: "c1"}, {Email: "b@x.dev"}, {Id: "c3"}},
+		WithInclude(ContactIncludeProperties, ContactIncludeTopics))
+	require.NoError(t, err)
+	assert.Equal(t, http.MethodPost, rec.Method)
+	assert.Equal(t, "/contacts/batch/get", rec.Path)
+	assert.Empty(t, rec.RawQuery)
+	assert.JSONEq(t, `{"contacts":[{"id":"c1"},{"email":"b@x.dev"},{"id":"c3"}],"include":["properties","topics"]}`, string(rec.Body))
+	assert.Equal(t, "list", res.Object)
+	require.Len(t, res.Data, 1)
+	assert.Equal(t, BatchGetContact{Object: "contact", ContactListItem: ContactListItem{
+		Id: "c1", Email: "a@x.dev", FirstName: "A", CreatedAt: "2026-01-01T00:00:00Z",
+		Properties: map[string]ContactPropertyValue{"plan": {Type: "string", Value: "pro"}},
+		Topics:     []ContactTopic{},
+	}}, res.Data[0])
+	assert.Equal(t, []BatchGetMissingContact{{Index: 1, Email: "b@x.dev"}, {Index: 2, Id: "c3"}}, res.Missing)
+
+	// Email wins over Id in an address; without WithInclude no include key is sent.
+	_, err = c.Contacts.Batch.GetWithContext(context.Background(), []ContactAddress{{Id: "c2", Email: "c@x.dev"}})
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"contacts":[{"email":"c@x.dev"}]}`, string(rec.Body))
+}
+
 func TestContactsCreatePreferencesLink(t *testing.T) {
 	c, rec := mockServer(t, 200, `{"object":"preferences_link","contact":"c1","url":"https://app.x.dev/p/tok"}`)
 	link, err := c.Contacts.CreatePreferencesLink(ContactAddress{Email: "ada@x.dev"})
@@ -300,6 +355,11 @@ func TestSegmentsListContacts(t *testing.T) {
 	assert.Equal(t, "limit=10", rec.RawQuery)
 	require.Len(t, res.Data, 1)
 	assert.Equal(t, "a@x.dev", res.Data[0].Email)
+
+	_, err = c.Segments.ListContacts("s1", nil, WithInclude(ContactIncludeTopics))
+	require.NoError(t, err)
+	assert.Equal(t, "/segments/s1/contacts", rec.Path)
+	assert.Equal(t, "include=topics", rec.RawQuery)
 }
 
 func TestSuppressions(t *testing.T) {

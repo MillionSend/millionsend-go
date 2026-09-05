@@ -33,7 +33,7 @@ import (
 )
 
 // Version is the SDK version, reported in the User-Agent.
-const Version = "0.6.0"
+const Version = "0.7.0"
 
 const defaultBaseURL = "https://api.millionsend.com"
 
@@ -151,14 +151,28 @@ const (
 	OnConflictUpsert OnConflict = "upsert"
 )
 
-// RequestOption configures a single request. The POST endpoints that take
-// options are Emails.Send, Batch.Send and Contacts.Batch.Create.
+// ContactInclude is a facet Contacts.List, Segments.ListContacts and
+// Contacts.Batch.Get attach to each contact via WithInclude (MillionSend
+// extension).
+type ContactInclude string
+
+const (
+	// ContactIncludeProperties fills ContactListItem.Properties.
+	ContactIncludeProperties ContactInclude = "properties"
+	// ContactIncludeTopics fills ContactListItem.Topics.
+	ContactIncludeTopics ContactInclude = "topics"
+)
+
+// RequestOption configures a single request. Emails.Send, Batch.Send,
+// Contacts.Batch.Create and Contacts.Batch.Get take them; Contacts.List and
+// Segments.ListContacts take WithInclude.
 type RequestOption func(*requestConfig)
 
 type requestConfig struct {
 	idempotencyKey  string
 	batchValidation BatchValidationMode
 	onConflict      OnConflict
+	include         []ContactInclude
 }
 
 // WithIdempotencyKey attaches an Idempotency-Key header to a send.
@@ -174,6 +188,13 @@ func WithBatchValidation(mode BatchValidationMode) RequestOption {
 // WithOnConflict sets the on_conflict query of Contacts.Batch.Create.
 func WithOnConflict(mode OnConflict) RequestOption {
 	return func(c *requestConfig) { c.onConflict = mode }
+}
+
+// WithInclude attaches the given facets to every contact returned by
+// Contacts.List and Segments.ListContacts (the include query) and by
+// Contacts.Batch.Get (the include body field).
+func WithInclude(facets ...ContactInclude) RequestOption {
+	return func(c *requestConfig) { c.include = facets }
 }
 
 func buildConfig(opts []RequestOption) requestConfig {
