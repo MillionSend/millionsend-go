@@ -101,7 +101,8 @@ nothing is sent.
 ## Request options
 
 `Emails.Send`, `Batch.Send`, `Contacts.Batch.Create`, `Contacts.Batch.Get`,
-`Contacts.List` and `Segments.ListContacts` take functional options:
+`Contacts.List`, `Segments.ListContacts` and `Contacts.Remove` take functional
+options:
 
 ```go
 client.Emails.Send(req, millionsend.WithIdempotencyKey("order-42"))
@@ -111,6 +112,7 @@ client.Batch.Send(reqs,
 )
 client.Contacts.Batch.Create(contacts, millionsend.WithOnConflict(millionsend.OnConflictUpsert))
 client.Contacts.List(nil, millionsend.WithInclude(millionsend.ContactIncludeTopics)) // ?include=topics
+client.Contacts.Remove(addr, millionsend.WithErase())                                // ?erase=true
 ```
 
 resend-go's option structs work too:
@@ -190,7 +192,9 @@ client.Contacts.Get(millionsend.ContactAddress{Email: "ada@acme.dev"}) // id or 
 client.Contacts.Update(&millionsend.UpdateContactRequest{
 	Id: contactID, Unsubscribed: millionsend.Ptr(true), FirstName: millionsend.Ptr("Ada"),
 }) // nil fields are left unchanged
-client.Contacts.Remove(millionsend.ContactAddress{Email: "ada@acme.dev"})
+client.Contacts.Remove(millionsend.ContactAddress{Email: "ada@acme.dev"}) // its emails stay in the send log
+client.Contacts.Remove(millionsend.ContactAddress{Email: "ada@acme.dev"},
+	millionsend.WithErase()) // also scrubs the address from email history, events and API logs (GDPR/LGPD)
 client.Contacts.List(&millionsend.ListOptions{Limit: 50})
 // Bulk read (MillionSend extension): attach the property map and the topic
 // subscriptions to every item, so an audience reads in one request per 100
@@ -256,12 +260,14 @@ res, err := client.Contacts.Batch.Get([]millionsend.ContactAddress{{Id: contactI
 
 `POST /contacts/batch/remove` deletes up to 1000 contacts by `Ids` or by
 `Emails` (exactly one of the two; emails match case-insensitively) and lists
-only the rows actually deleted. Each deletion is the same erasure as
-`Contacts.Remove`.
+only the rows actually deleted. Each deletion is the same as `Contacts.Remove`:
+the emails stay in the send log, and `Erase: true` also scrubs each address
+from email history, event payloads and API logs.
 
 ```go
 rm, err := client.Contacts.Batch.Remove(&millionsend.BatchRemoveContactsRequest{Emails: []string{"a@x.dev", "b@x.dev"}})
 // rm.Data[i] → {Object: "contact", Contact: id, Deleted: true}
+rm, err = client.Contacts.Batch.Remove(&millionsend.BatchRemoveContactsRequest{Ids: ids, Erase: true}) // GDPR/LGPD erasure
 ```
 
 ### Contact properties

@@ -195,10 +195,13 @@ type BatchContactsResponse struct {
 }
 
 // BatchRemoveContactsRequest deletes by Emails or by Ids (exactly one of the
-// two, up to 1000 each). Emails match case-insensitively.
+// two, up to 1000 each). Emails match case-insensitively. Erase also scrubs
+// each address from email history, event payloads and API logs (a GDPR/LGPD
+// erasure); without it the deleted contacts' emails stay in the send log.
 type BatchRemoveContactsRequest struct {
 	Emails []string `json:"emails,omitempty"`
 	Ids    []string `json:"ids,omitempty"`
+	Erase  bool     `json:"erase,omitempty"`
 }
 
 // BatchRemoveContactsResponse lists only the rows actually deleted; unknown
@@ -320,10 +323,16 @@ func (s *ContactsService) Update(params *UpdateContactRequest) (*ContactId, erro
 	})
 }
 
-// Remove deletes a contact by id or email.
-func (s *ContactsService) Remove(addr ContactAddress) (*RemoveContactResponse, error) {
+// Remove deletes a contact by id or email. The contact's emails stay in the
+// send log; WithErase also scrubs the address from email history, event
+// payloads and API logs.
+func (s *ContactsService) Remove(addr ContactAddress, opts ...RequestOption) (*RemoveContactResponse, error) {
+	var q url.Values
+	if buildConfig(opts).erase {
+		q = url.Values{"erase": {"true"}}
+	}
 	return doJSON[RemoveContactResponse](s.client, context.Background(), requestParams{
-		method: http.MethodDelete, path: contactPath(addr.key()),
+		method: http.MethodDelete, path: contactPath(addr.key()), query: q,
 	})
 }
 
@@ -398,7 +407,8 @@ func (s *ContactsBatchService) GetWithContext(ctx context.Context, addrs []Conta
 }
 
 // Remove deletes up to 1000 contacts (by email or by id) in one call. Each
-// deletion is the same erasure as Contacts.Remove.
+// deletion is the same as Contacts.Remove: emails stay in the send log unless
+// Erase is set.
 func (s *ContactsBatchService) Remove(params *BatchRemoveContactsRequest) (*BatchRemoveContactsResponse, error) {
 	return s.RemoveWithContext(context.Background(), params)
 }

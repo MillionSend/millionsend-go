@@ -206,6 +206,12 @@ func TestContactsRemoveAndList(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, http.MethodDelete, rec.Method)
 	assert.Equal(t, "/contacts/c@x.dev", rec.Path)
+	assert.Empty(t, rec.RawQuery)
+
+	_, err = c.Contacts.Remove(ContactAddress{Id: "c1"}, WithErase())
+	require.NoError(t, err)
+	assert.Equal(t, "/contacts/c1", rec.Path)
+	assert.Equal(t, "erase=true", rec.RawQuery)
 
 	_, err = c.Contacts.List(&ListOptions{After: "cur"})
 	require.NoError(t, err)

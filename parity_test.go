@@ -18,7 +18,7 @@ func TestUserAgentCarriesVersion(t *testing.T) {
 	c, rec := mockServer(t, 200, anyOK)
 	_, err := c.Usage.Get()
 	require.NoError(t, err)
-	assert.Equal(t, "millionsend-go/0.7.0", rec.Header.Get("User-Agent"))
+	assert.Equal(t, "millionsend-go/0.8.0", rec.Header.Get("User-Agent"))
 }
 
 func TestSendFullWireBody(t *testing.T) {
@@ -214,6 +214,10 @@ func TestContactsBatchRemove(t *testing.T) {
 	_, err = c.Contacts.Batch.RemoveWithContext(context.Background(), &BatchRemoveContactsRequest{Emails: []string{"a@x.dev"}})
 	require.NoError(t, err)
 	assert.JSONEq(t, `{"emails":["a@x.dev"]}`, string(rec.Body))
+
+	_, err = c.Contacts.Batch.Remove(&BatchRemoveContactsRequest{Ids: []string{"c1"}, Erase: true})
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"ids":["c1"],"erase":true}`, string(rec.Body))
 }
 
 func TestContactsListInclude(t *testing.T) {

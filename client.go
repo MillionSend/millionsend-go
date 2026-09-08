@@ -33,7 +33,7 @@ import (
 )
 
 // Version is the SDK version, reported in the User-Agent.
-const Version = "0.7.0"
+const Version = "0.8.0"
 
 const defaultBaseURL = "https://api.millionsend.com"
 
@@ -165,7 +165,7 @@ const (
 
 // RequestOption configures a single request. Emails.Send, Batch.Send,
 // Contacts.Batch.Create and Contacts.Batch.Get take them; Contacts.List and
-// Segments.ListContacts take WithInclude.
+// Segments.ListContacts take WithInclude; Contacts.Remove takes WithErase.
 type RequestOption func(*requestConfig)
 
 type requestConfig struct {
@@ -173,6 +173,7 @@ type requestConfig struct {
 	batchValidation BatchValidationMode
 	onConflict      OnConflict
 	include         []ContactInclude
+	erase           bool
 }
 
 // WithIdempotencyKey attaches an Idempotency-Key header to a send.
@@ -195,6 +196,14 @@ func WithOnConflict(mode OnConflict) RequestOption {
 // Contacts.Batch.Get (the include body field).
 func WithInclude(facets ...ContactInclude) RequestOption {
 	return func(c *requestConfig) { c.include = facets }
+}
+
+// WithErase sets the erase query of Contacts.Remove: the address is also
+// scrubbed from email history, event payloads and API logs (a GDPR/LGPD
+// erasure). Without it a delete keeps the contact's emails in the send log.
+// Contacts.Batch.Remove takes the same flag as BatchRemoveContactsRequest.Erase.
+func WithErase() RequestOption {
+	return func(c *requestConfig) { c.erase = true }
 }
 
 func buildConfig(opts []RequestOption) requestConfig {
