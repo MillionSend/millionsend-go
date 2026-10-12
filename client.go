@@ -333,6 +333,14 @@ type requestParams struct {
 }
 
 func (c *Client) do(ctx context.Context, p requestParams, out any) error {
+	// URL normalization resolves an empty, "." or ".." segment away, so an id
+	// such as ".." would send the request to another resource
+	// (DELETE /inboxes/{id}/labels/.. deletes the inbox).
+	for _, segment := range strings.Split(p.path, "/")[1:] {
+		if segment == "" || segment == "." || segment == ".." {
+			return &MillionSendError{Name: "validation_error", Message: `an id in the request path is empty, "." or ".."`}
+		}
+	}
 	var bodyReader io.Reader
 	hasBody := p.body != nil && p.method != http.MethodGet && p.method != http.MethodDelete
 	if hasBody {

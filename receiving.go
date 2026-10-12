@@ -120,12 +120,15 @@ type ReceivedEmailList struct {
 	Held    []HeldEmail     `json:"held"`
 }
 
-// HeldEmail is a long-poll match an inbox held back.
+// HeldEmail is a long-poll match an inbox held back. Reason is "pending"
+// (still being screened) or "quarantined"; QuarantineReason says why, empty
+// while pending. InboxId is empty for a catch-all copy held for a virus.
 type HeldEmail struct {
-	Id        string `json:"id"`
-	InboxId   string `json:"inbox_id"`
-	Reason    string `json:"reason"`
-	CreatedAt string `json:"created_at"`
+	Id               string `json:"id"`
+	InboxId          string `json:"inbox_id"`
+	Reason           string `json:"reason"`
+	QuarantineReason string `json:"quarantine_reason"`
+	CreatedAt        string `json:"created_at"`
 }
 
 // ListReceivedEmailsOptions filters and paginates Receiving.List. Wait (up to

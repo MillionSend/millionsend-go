@@ -218,3 +218,22 @@ func TestTransportErrorHasNullStatus(t *testing.T) {
 	require.ErrorAs(t, err, &mse)
 	assert.Equal(t, 0, mse.StatusCode, "transport failures use statusCode null (0)")
 }
+
+func TestNeverSendsAPathADotIdRedirects(t *testing.T) {
+	c, rec := mockServer(t, 200, `{}`)
+	calls := []func() error{
+		func() error { _, err := c.Inboxes.Labels.Remove("ib1", ".."); return err },
+		func() error { _, err := c.Inboxes.Threads.Remove("ib1", "."); return err },
+		func() error { _, err := c.Emails.Get(""); return err },
+	}
+	for _, call := range calls {
+		var mse *MillionSendError
+		require.ErrorAs(t, call(), &mse)
+		assert.Equal(t, "validation_error", mse.Name)
+		assert.Equal(t, 0, mse.StatusCode)
+	}
+	assert.Empty(t, rec.Method, "nothing was sent")
+	_, err := c.Inboxes.Labels.Remove("ib1", "...")
+	require.NoError(t, err)
+	assert.Equal(t, "/inboxes/ib1/labels/...", rec.Path)
+}

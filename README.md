@@ -208,7 +208,7 @@ client.Emails.Receiving.Remove(id) // erase now (full-access keys)
 page, _ = client.Emails.Receiving.ListWithContext(ctx, &millionsend.ListReceivedEmailsOptions{
 	InboxId: inboxID, From: "github.com", Wait: 30,
 })
-// page.Data: what arrived; page.Held: []HeldEmail{Id, InboxId, Reason, CreatedAt},
+// page.Data: what arrived; page.Held: []HeldEmail{Id, InboxId, Reason, QuarantineReason, CreatedAt},
 // matches held for screening or quarantine
 
 // Reply and forward from the server, threaded
