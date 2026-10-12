@@ -139,14 +139,16 @@ type ListReceivedEmailsOptions struct {
 	After           string
 	Before          string
 	Wait            int
-	Since           string // ISO 8601
+	Since           string // ISO 8601 with an offset, as time.RFC3339 writes it
 	InboxId         string
 	To              string // an address the message was delivered to
 	From            string // an address, or a domain covering its subdomains
 	SubjectContains string
 	Unread          *bool // needs InboxId
-	// IncludeQuarantined also lists held mail; full-access keys only.
+	// IncludeQuarantined also lists held mail, Quarantined lists only held
+	// mail; full-access keys not scoped to an inbox.
 	IncludeQuarantined bool
+	Quarantined        bool
 }
 
 func (o *ListReceivedEmailsOptions) values() url.Values {
@@ -162,6 +164,7 @@ func (o *ListReceivedEmailsOptions) values() url.Values {
 	setQuery(v, "subject_contains", o.SubjectContains)
 	setQuery(v, "unread", o.Unread)
 	setQuery(v, "include_quarantined", o.IncludeQuarantined)
+	setQuery(v, "quarantined", o.Quarantined)
 	return v
 }
 

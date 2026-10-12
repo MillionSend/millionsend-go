@@ -180,15 +180,17 @@ const (
 // Contacts.Batch.Create and Contacts.Batch.Get take them; Contacts.List and
 // Segments.ListContacts take WithInclude; Contacts.Remove takes WithErase;
 // the receiving and inbox replies, forwards and draft sends take
-// WithIdempotencyKey.
+// WithIdempotencyKey; Inboxes.Threads.Emails.List and Get take
+// WithIncludeQuarantined.
 type RequestOption func(*requestConfig)
 
 type requestConfig struct {
-	idempotencyKey  string
-	batchValidation BatchValidationMode
-	onConflict      OnConflict
-	include         []ContactInclude
-	erase           bool
+	idempotencyKey     string
+	batchValidation    BatchValidationMode
+	onConflict         OnConflict
+	include            []ContactInclude
+	erase              bool
+	includeQuarantined bool
 }
 
 // WithIdempotencyKey attaches an Idempotency-Key header to a send.
@@ -219,6 +221,13 @@ func WithInclude(facets ...ContactInclude) RequestOption {
 // Contacts.Batch.Remove takes the same flag as BatchRemoveContactsRequest.Erase.
 func WithErase() RequestOption {
 	return func(c *requestConfig) { c.erase = true }
+}
+
+// WithIncludeQuarantined sets the include_quarantined query of
+// Inboxes.Threads.Emails.List and Get: messages held for screening or in
+// quarantine are read too (full-access keys not scoped to an inbox).
+func WithIncludeQuarantined() RequestOption {
+	return func(c *requestConfig) { c.includeQuarantined = true }
 }
 
 func buildConfig(opts []RequestOption) requestConfig {

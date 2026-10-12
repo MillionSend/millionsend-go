@@ -415,7 +415,7 @@ type CreateInboxDraftRequest struct {
 
 // UpdateInboxDraftRequest is the payload for Drafts.Update; empty fields are
 // left unchanged, and setting Html or Text replaces both. The Clear… methods
-// send null to empty a field.
+// send null to empty a field; ClearBody empties Html and Text.
 type UpdateInboxDraftRequest struct {
 	To      []string `json:"to,omitempty"`
 	Cc      []string `json:"cc,omitempty"`
@@ -438,6 +438,9 @@ func (r *UpdateInboxDraftRequest) ClearBcc() { r.nulls = append(r.nulls, "bcc") 
 
 // ClearSubject sends subject as null.
 func (r *UpdateInboxDraftRequest) ClearSubject() { r.nulls = append(r.nulls, "subject") }
+
+// ClearBody sends html and text as null, removing the draft's body.
+func (r *UpdateInboxDraftRequest) ClearBody() { r.nulls = append(r.nulls, "html", "text") }
 
 // MarshalJSON adds the cleared fields as explicit nulls.
 func (r UpdateInboxDraftRequest) MarshalJSON() ([]byte, error) {
@@ -656,18 +659,32 @@ func (s *InboxThreadsService) Remove(inboxId, threadId string) (*RemoveResponse,
 type InboxThreadEmailsService struct{ client *Client }
 
 // List returns a thread's messages, oldest first; After pages toward newer.
-// Pass nil for defaults.
-func (s *InboxThreadEmailsService) List(inboxId, threadId string, opts *ListOptions) (*ListResponse[InboxThreadEmail], error) {
+// Pass nil for defaults; WithIncludeQuarantined also lists held messages.
+func (s *InboxThreadEmailsService) List(inboxId, threadId string, opts *ListOptions, ropts ...RequestOption) (*ListResponse[InboxThreadEmail], error) {
 	return doJSON[ListResponse[InboxThreadEmail]](s.client, context.Background(), requestParams{
-		method: http.MethodGet, path: threadPath(inboxId, threadId) + "/emails", query: opts.values(),
+		method: http.MethodGet, path: threadPath(inboxId, threadId) + "/emails", query: heldQuery(opts.values(), ropts),
 	})
 }
 
-// Get fetches one message of a thread.
-func (s *InboxThreadEmailsService) Get(inboxId, threadId, emailId string) (*InboxThreadEmail, error) {
+// Get fetches one message of a thread; WithIncludeQuarantined reads it even
+// when it is held.
+func (s *InboxThreadEmailsService) Get(inboxId, threadId, emailId string, opts ...RequestOption) (*InboxThreadEmail, error) {
 	return doJSON[InboxThreadEmail](s.client, context.Background(), requestParams{
 		method: http.MethodGet, path: threadPath(inboxId, threadId) + "/emails/" + url.PathEscape(emailId),
+		query: heldQuery(nil, opts),
 	})
+}
+
+// heldQuery adds include_quarantined=true to q when opts carry WithIncludeQuarantined.
+func heldQuery(q url.Values, opts []RequestOption) url.Values {
+	if !buildConfig(opts).includeQuarantined {
+		return q
+	}
+	if q == nil {
+		q = url.Values{}
+	}
+	q.Set("include_quarantined", "true")
+	return q
 }
 
 // Reply answers a message in its thread from the inbox address. Pass

@@ -763,7 +763,9 @@ func TestReceivingListLongPollQueryAndHeld(t *testing.T) {
 	c, rec := mockServer(t, 200, `{"object":"list","has_more":false,"data":[{"id":"r1","from":"a@x.dev",
 		"screening":{"verdict":"clean","sender_trust":"external"},"extracted":{"kinds":["code"]},"read":false,
 		"inbox_id":"i1","thread_id":"t1","spam_verdict":"pass"}],
-		"held":[{"id":"r2","inbox_id":"i1","reason":"not_allowlisted","created_at":"2026-10-12T10:00:00.000Z"}]}`)
+		"held":[{"id":"r2","inbox_id":"i1","reason":"quarantined","quarantine_reason":"not_allowlisted",
+		"created_at":"2026-10-12T10:00:00.000Z"},{"id":"r3","inbox_id":null,"reason":"pending","quarantine_reason":null,
+		"created_at":"2026-10-12T10:00:01.000Z"}]}`)
 	res, err := c.Emails.Receiving.List(&ListReceivedEmailsOptions{
 		Limit: 10, Before: "r0", Wait: 30, Since: "2026-10-12T00:00:00Z", InboxId: "i1", To: "bot@x.dev",
 		From: "stripe.com", SubjectContains: "code", Unread: Ptr(false), IncludeQuarantined: true,
@@ -777,11 +779,18 @@ func TestReceivingListLongPollQueryAndHeld(t *testing.T) {
 	assert.Equal(t, "external", res.Data[0].Screening.SenderTrust)
 	assert.Equal(t, []string{"code"}, res.Data[0].Extracted.Kinds)
 	assert.False(t, *res.Data[0].Read)
-	assert.Equal(t, []HeldEmail{{Id: "r2", InboxId: "i1", Reason: "not_allowlisted", CreatedAt: "2026-10-12T10:00:00.000Z"}}, res.Held)
+	assert.Equal(t, []HeldEmail{
+		{Id: "r2", InboxId: "i1", Reason: "quarantined", QuarantineReason: "not_allowlisted", CreatedAt: "2026-10-12T10:00:00.000Z"},
+		{Id: "r3", Reason: "pending", CreatedAt: "2026-10-12T10:00:01.000Z"},
+	}, res.Held)
 
 	_, err = c.Emails.Receiving.List(nil)
 	require.NoError(t, err)
 	assert.Empty(t, rec.RawQuery)
+
+	_, err = c.Emails.Receiving.List(&ListReceivedEmailsOptions{Quarantined: true})
+	require.NoError(t, err)
+	assert.Equal(t, "quarantined=true", rec.RawQuery)
 }
 
 // A long-poll outlives the client's own timeout by the time it may wait.
@@ -1088,6 +1097,17 @@ func TestInboxThreadEmails(t *testing.T) {
 	_, err = c.Inboxes.Threads.Emails.Get("i1", "t1", "m1")
 	require.NoError(t, err)
 	assert.Equal(t, "/inboxes/i1/threads/t1/emails/m1", rec.Path)
+	assert.Empty(t, rec.RawQuery)
+
+	_, err = c.Inboxes.Threads.Emails.List("i1", "t1", nil, WithIncludeQuarantined())
+	require.NoError(t, err)
+	assert.Equal(t, "include_quarantined=true", rec.RawQuery)
+	_, err = c.Inboxes.Threads.Emails.List("i1", "t1", &ListOptions{Limit: 5}, WithIncludeQuarantined())
+	require.NoError(t, err)
+	assert.Equal(t, "include_quarantined=true&limit=5", rec.RawQuery)
+	_, err = c.Inboxes.Threads.Emails.Get("i1", "t1", "m1", WithIncludeQuarantined())
+	require.NoError(t, err)
+	assert.Equal(t, "include_quarantined=true", rec.RawQuery)
 
 	c, rec = mockServer(t, 200, `{"id":"m2","direction":"outbound","from":"Signup bot <bot@acme.dev>","to":["ada@x.dev"],
 		"cc":[],"bcc":[],"reply_to":[],"subject":"Re: Hi","message_id":null,"html":null,"text":"Thanks","attachments":[],
@@ -1140,6 +1160,12 @@ func TestInboxDrafts(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, http.MethodPatch, rec.Method)
 	assert.JSONEq(t, `{"html":"<p>Thanks</p>","subject":null,"cc":null}`, string(rec.Body))
+
+	body := &UpdateInboxDraftRequest{}
+	body.ClearBody()
+	_, err = c.Inboxes.Drafts.Update("i1", "d1", body)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"html":null,"text":null}`, string(rec.Body))
 
 	_, err = c.Inboxes.Drafts.Remove("i1", "d1")
 	require.NoError(t, err)

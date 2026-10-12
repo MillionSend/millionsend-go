@@ -111,7 +111,8 @@ nothing is sent.
 `Emails.Send`, `Batch.Send`, `Contacts.Batch.Create`, `Contacts.Batch.Get`,
 `Contacts.List`, `Segments.ListContacts` and `Contacts.Remove` take functional
 options, and so do the replies, forwards and draft sends of
-`Emails.Receiving` and `Inboxes` (`WithIdempotencyKey`):
+`Emails.Receiving` and `Inboxes` (`WithIdempotencyKey`) and
+`Inboxes.Threads.Emails.List/Get` (`WithIncludeQuarantined`):
 
 ```go
 client.Emails.Send(req, millionsend.WithIdempotencyKey("order-42"))
@@ -122,6 +123,7 @@ client.Batch.Send(reqs,
 client.Contacts.Batch.Create(contacts, millionsend.WithOnConflict(millionsend.OnConflictUpsert))
 client.Contacts.List(nil, millionsend.WithInclude(millionsend.ContactIncludeTopics)) // ?include=topics
 client.Contacts.Remove(addr, millionsend.WithErase())                                // ?erase=true
+client.Inboxes.Threads.Emails.List(inboxID, threadID, nil, millionsend.WithIncludeQuarantined()) // held mail too
 ```
 
 resend-go's option structs work too:
@@ -154,7 +156,7 @@ Available: `UpdateContactRequest.ClearFirstName/ClearLastName`,
 `UpdateBroadcastRequest.ClearTopicId`, `UpdateTemplateRequest.ClearSubject/ClearText/ClearAlias`,
 `UpdateDomainRequest.ClearTrackingSubdomain`, `UpdateSegmentRequest.ClearFilter`,
 `UpdateWebhookRequest.ClearInboxIds`, `UpdateInboxRequest.ClearExpiresIn`,
-`InboxSafetyUpdate.ClearSendCap`, `UpdateInboxDraftRequest.ClearTo/ClearCc/ClearBcc/ClearSubject`. A `nil` value inside
+`InboxSafetyUpdate.ClearSendCap`, `UpdateInboxDraftRequest.ClearTo/ClearCc/ClearBcc/ClearSubject/ClearBody`. A `nil` value inside
 `UpdateContactRequest.Properties` removes that key, and a nil
 `UpdateContactPropertyRequest.FallbackValue` clears the fallback.
 
@@ -223,7 +225,7 @@ client.Emails.Receiving.Forward(id, &millionsend.ForwardReceivedEmailRequest{
 ```
 
 `ListReceivedEmailsOptions` also takes `Before`/`After`, `Since`, `To`,
-`SubjectContains`, `Unread` (with `InboxId`) and `IncludeQuarantined`
+`SubjectContains`, `Unread` (with `InboxId`), and `IncludeQuarantined` or `Quarantined`
 (full-access keys). `From` is an address, or a domain covering its subdomains.
 Replies and forwards return a `*SendOutcome[T]`: `Sent` once the email went
 out, or `Draft` when an inbox's rules hold it for approval.
