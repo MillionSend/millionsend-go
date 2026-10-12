@@ -150,8 +150,12 @@ type BatchSendResponse struct {
 }
 
 // EmailsService covers POST /emails, GET /emails, GET/PATCH/DELETE /emails/:id
-// and the cancel action.
-type EmailsService struct{ client *Client }
+// and the cancel action. Receiving covers the mail your domains receive.
+type EmailsService struct {
+	client *Client
+
+	Receiving *ReceivingService
+}
 
 // Send posts a single email. Pass WithIdempotencyKey to make the send idempotent.
 func (s *EmailsService) Send(params *SendEmailRequest, opts ...RequestOption) (*SendEmailResponse, error) {

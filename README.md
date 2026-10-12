@@ -64,9 +64,13 @@ client.AllowInsecureHTTP = true                          // accept a non-loopbac
   instance elsewhere (e.g. inside a private network).
 
 Every method has a non-context form. The transactional hot path — every
-`Emails.*` method, `Batch.Send`, `Contacts.Batch.*`,
+method of `Emails` itself, `Batch.Send`, `Contacts.Batch.*`,
 `Suppressions.Batch.*`, `Deliverability.Get` and `Usage.Get` — also exposes a
-`…WithContext(ctx, …)` variant.
+`…WithContext(ctx, …)` variant, as do the long-polls
+`Emails.Receiving.ListWithContext` and `Inboxes.Codes.LatestWithContext`
+(`Emails.Receiving.GetWithOptions` takes a context too). A long-poll stretches
+the `HTTPClient` timeout by its `Wait`, so the default 30s client can wait the
+full 50s.
 
 ## Errors
 
@@ -94,6 +98,10 @@ if err != nil {
 `StatusCode` is `0` when the request never reached the API (a transport or
 client-side failure) — the wire's `statusCode: null`.
 
+Receiving and inboxes add the names `inbox_send_policy`, `inbox_send_cap_reached`,
+`approval_required`, `email_quarantined`, `email_blocked`, `too_many_waits` and
+`plan_limit_reached`.
+
 `Emails.Send` and `Batch.Send` answer `422 all_recipients_suppressed` when every
 `To` recipient is on the suppression list or opted out of the send's `TopicId`;
 nothing is sent.
@@ -102,7 +110,8 @@ nothing is sent.
 
 `Emails.Send`, `Batch.Send`, `Contacts.Batch.Create`, `Contacts.Batch.Get`,
 `Contacts.List`, `Segments.ListContacts` and `Contacts.Remove` take functional
-options:
+options, and so do the replies, forwards and draft sends of
+`Emails.Receiving` and `Inboxes` (`WithIdempotencyKey`):
 
 ```go
 client.Emails.Send(req, millionsend.WithIdempotencyKey("order-42"))
@@ -143,7 +152,9 @@ client.Contacts.Update(req)
 
 Available: `UpdateContactRequest.ClearFirstName/ClearLastName`,
 `UpdateBroadcastRequest.ClearTopicId`, `UpdateTemplateRequest.ClearSubject/ClearText/ClearAlias`,
-`UpdateDomainRequest.ClearTrackingSubdomain`, `UpdateSegmentRequest.ClearFilter`. A `nil` value inside
+`UpdateDomainRequest.ClearTrackingSubdomain`, `UpdateSegmentRequest.ClearFilter`,
+`UpdateWebhookRequest.ClearInboxIds`, `UpdateInboxRequest.ClearExpiresIn`,
+`InboxSafetyUpdate.ClearSendCap`, `UpdateInboxDraftRequest.ClearTo/ClearCc/ClearBcc/ClearSubject`. A `nil` value inside
 `UpdateContactRequest.Properties` removes that key, and a nil
 `UpdateContactPropertyRequest.FallbackValue` clears the fallback.
 
@@ -175,6 +186,115 @@ client.Batch.Send([]*millionsend.SendEmailRequest{a, b}, millionsend.WithIdempot
 `Attachment.Content` is raw bytes; it is base64-encoded on the wire. `Template`
 is passed through unchanged: the API does not support stored-template sends
 yet and answers `422` (send `Html`/`Text` instead).
+
+### Receiving
+
+Mail your domains receive: resend-go's `Emails.Receiving` plus MillionSend's
+long-poll, server-side reply and forward, and erase. Inbox-scoped keys never
+see mail held for screening or in quarantine.
+
+```go
+page, _ := client.Emails.Receiving.List(&millionsend.ListReceivedEmailsOptions{Limit: 20})
+email, _ := client.Emails.Receiving.Get(id)
+email, _ = client.Emails.Receiving.GetWithOptions(ctx, id, &millionsend.GetReceivedEmailParams{HtmlFormat: millionsend.Ptr("cid")})
+// email.ExtractedText: the visible text, hidden text and invisible characters removed
+// email.Screening: *Screening{Verdict, SenderTrust, QuarantineReason, InjectionScore, …}
+// email.Extracted: *ReceivedEmailExtracted{Kinds, Code, Link, …} on verification mail
+client.Emails.Receiving.Attachments.List(id, nil) // each with a signed DownloadUrl (1 hour)
+client.Emails.Receiving.Attachments.Get(id, attachmentID)
+client.Emails.Receiving.Remove(id) // erase now (full-access keys)
+
+// Long-poll: wait up to 50 s for the next match
+page, _ = client.Emails.Receiving.ListWithContext(ctx, &millionsend.ListReceivedEmailsOptions{
+	InboxId: inboxID, From: "github.com", Wait: 30,
+})
+// page.Data: what arrived; page.Held: []HeldEmail{Id, InboxId, Reason, CreatedAt},
+// matches held for screening or quarantine
+
+// Reply and forward from the server, threaded
+res, err := client.Emails.Receiving.Reply(id, &millionsend.ReplyReceivedEmailRequest{Text: "Thanks!"},
+	millionsend.WithIdempotencyKey("reply-"+id))
+if res.Draft != nil {
+	// held for a person to approve (HTTP 202): res.Draft.ApprovalReasons says why
+}
+client.Emails.Receiving.Forward(id, &millionsend.ForwardReceivedEmailRequest{
+	To: []string{"ops@acme.dev"}, Mode: "attachment", // the original as an .eml
+})
+```
+
+`ListReceivedEmailsOptions` also takes `Before`/`After`, `Since`, `To`,
+`SubjectContains`, `Unread` (with `InboxId`) and `IncludeQuarantined`
+(full-access keys). `From` is an address, or a domain covering its subdomains.
+Replies and forwards return a `*SendOutcome[T]`: `Sent` once the email went
+out, or `Draft` when an inbox's rules hold it for approval.
+
+### Inboxes (beta)
+
+Addresses whose mail lands in threads, for an agent (`Kind: "agent"`, the
+default: screening, code extraction and send rules on) or for people
+(`Kind: "human"`). Mirrors Resend's Inboxes beta; `Safety`, `Codes` and
+`Quarantine` are MillionSend extensions.
+
+```go
+inbox, _ := client.Inboxes.Create(&millionsend.CreateInboxRequest{Name: "Signup bot", ExpiresIn: "24h"}) // a random address on the shared domain
+inbox, _ = client.Inboxes.Create(&millionsend.CreateInboxRequest{EmailAddress: "support@acme.dev", Kind: "human"})
+client.Inboxes.List(&millionsend.ListInboxesOptions{Kind: "agent"})
+client.Inboxes.Get("support@acme.dev") // by id or address
+upd := &millionsend.UpdateInboxRequest{Name: "Support", FromName: millionsend.Ptr("Acme Support")}
+upd.ClearExpiresIn() // never expires
+client.Inboxes.Update(inbox.Id, upd)
+client.Inboxes.Remove(inbox.Id) // also revokes its inbox-scoped keys
+
+// Safety rules: who may write in and what an agent may send
+client.Inboxes.Safety.Get(inbox.Id)
+client.Inboxes.Safety.Update(inbox.Id, &millionsend.InboxSafetyUpdate{
+	AcceptFrom: "allowlist", Allowlist: millionsend.Ptr([]string{"*@stripe.com"}),
+})
+
+// Verification codes and sign-in links (never fetched); waits up to 50 s
+code, _ := client.Inboxes.Codes.Latest(inbox.Id, &millionsend.LatestCodeOptions{From: "github.com", Wait: 30})
+// code.Status: "found" | "none" | "ambiguous" | "timeout"; code.Code ("482913") or code.Url
+
+// Quarantine: held mail is kept and listed; agents see it only once a person releases it
+client.Inboxes.Quarantine.List(inbox.Id, nil)
+client.Inboxes.Quarantine.Release(inbox.Id, emailID, &millionsend.ReleaseQuarantinedRequest{TrustSender: true})
+
+// Threads and their messages
+client.Inboxes.Threads.List(inbox.Id, &millionsend.ListInboxThreadsOptions{Folders: []string{"inbox", "archive"}, Read: millionsend.Ptr(false)})
+client.Inboxes.Threads.Search(inbox.Id, &millionsend.SearchInboxThreadsOptions{Query: "invoice", From: []string{"stripe.com"}})
+client.Inboxes.Threads.Get(inbox.Id, threadID)
+client.Inboxes.Threads.Update(inbox.Id, threadID, &millionsend.UpdateInboxThreadRequest{Folder: "archive", LabelId: labelID})
+client.Inboxes.Threads.Remove(inbox.Id, threadID) // to trash, purged after 30 days
+client.Inboxes.Threads.Emails.List(inbox.Id, threadID, nil) // oldest first
+client.Inboxes.Threads.Emails.Get(inbox.Id, threadID, emailID)
+client.Inboxes.Threads.Emails.Reply(inbox.Id, threadID, emailID, &millionsend.ReplyInThreadRequest{Text: "On it."},
+	millionsend.WithIdempotencyKey("k1"))
+client.Inboxes.Threads.Emails.Forward(inbox.Id, threadID, emailID, &millionsend.ForwardInThreadRequest{To: []string{"ops@acme.dev"}})
+
+// Labels
+label, _ := client.Inboxes.Labels.Create(inbox.Id, &millionsend.CreateInboxLabelRequest{Name: "Billing", Color: "#FFAA00"})
+client.Inboxes.Labels.List(inbox.Id)
+client.Inboxes.Labels.Update(inbox.Id, label.Id, &millionsend.UpdateInboxLabelRequest{Name: "Invoices"})
+client.Inboxes.Labels.Remove(inbox.Id, label.Id)
+
+// Drafts
+draft, _ := client.Inboxes.Drafts.Create(inbox.Id, &millionsend.CreateInboxDraftRequest{
+	To: []string{"ada@x.dev"}, Subject: "Hello", Text: "Hi Ada",
+})
+client.Inboxes.Drafts.List(inbox.Id, nil)
+client.Inboxes.Drafts.Get(inbox.Id, draft.Id)
+client.Inboxes.Drafts.Update(inbox.Id, draft.Id, &millionsend.UpdateInboxDraftRequest{Text: "Hi Ada!"})
+client.Inboxes.Drafts.Send(inbox.Id, draft.Id, millionsend.WithIdempotencyKey("draft-1"))
+client.Inboxes.Drafts.Reject(inbox.Id, draft.Id) // approvers only
+client.Inboxes.Drafts.Remove(inbox.Id, draft.Id)
+```
+
+Thread replies, forwards and `Drafts.Send` return a `*SendOutcome[T]` like
+`Emails.Receiving.Reply`. An inbox-scoped key or an MCP token cannot send a
+draft that waits for approval (`approval_required`); a person in the dashboard
+or a full-access team key can. Slices in list and search options (`Folders`,
+`Labels`, `From`, …) go out as one comma-separated value. Resend's hosted agent
+settings (`/inboxes/:id/agent`) are not exposed: MillionSend runs no agent.
 
 ### Contacts
 
@@ -339,6 +459,7 @@ client.Domains.List(nil)
 client.Domains.Get(d.Id)
 client.Domains.Verify(d.Id) // re-checks DNS; returns per-record Status
 client.Domains.Update(d.Id, &millionsend.UpdateDomainRequest{OpenTracking: millionsend.Ptr(true)})
+client.Domains.Update(d.Id, &millionsend.UpdateDomainRequest{ReceivingCatchAll: millionsend.Ptr(true)}) // keep mail to addresses without an inbox (paid plans on Cloud)
 client.Domains.Remove(d.Id)
 ```
 
@@ -354,7 +475,14 @@ Events: `email.sent`, `email.delivered`, `email.delivery_delayed`,
 extensions `contact.unsubscribed`, `contact.resubscribed`,
 `contact.topic_opt_in`, `contact.topic_opt_out`, `suppression.added`,
 `suppression.removed`, `deliverability.warning`, `deliverability.paused`,
-`quota.warning`, `quota.reached`, `quota.paused`.
+`quota.warning`, `quota.reached`, `quota.paused`, `email.received`, and the
+inbox events `inbox.created`, `inbox.updated`, `inbox.deleted`,
+`inbox.expired`, `inbox.thread.created`, `inbox.thread.folder.updated`,
+`inbox.thread.labels.updated`, `inbox.email.received`, `inbox.email.sent`,
+`inbox.email.quarantined`, `inbox.draft.created`, `inbox.draft.updated`,
+`inbox.draft.sent`, `inbox.draft.deleted`. Inbox events are opt-in: an
+endpoint gets them only when its `Events` name them, and `InboxIds` limits
+them (and `email.received`) to those inboxes.
 
 ```go
 w, _ := client.Webhooks.Create(&millionsend.CreateWebhookRequest{
@@ -364,6 +492,7 @@ w, _ := client.Webhooks.Create(&millionsend.CreateWebhookRequest{
 client.Webhooks.List(nil)           // rows never carry the secret
 client.Webhooks.Get(w.Id)           // includes SigningSecret and PreviousSecretExpiresAt
 client.Webhooks.Update(w.Id, &millionsend.UpdateWebhookRequest{Status: "disabled"})
+client.Webhooks.Update(w.Id, &millionsend.UpdateWebhookRequest{InboxIds: []string{inboxID}}) // ClearInboxIds(): every inbox
 client.Webhooks.Remove(w.Id)
 
 // Rotate the secret (MillionSend extension). For OverlapHours (default 24,
@@ -382,6 +511,9 @@ secret.
 k, _ := client.ApiKeys.Create(&millionsend.CreateApiKeyRequest{
 	Name: "ci", Permission: "sending_access", DomainId: domainID,
 }) // k.Token is returned only here
+client.ApiKeys.Create(&millionsend.CreateApiKeyRequest{
+	Name: "signup-bot", Permission: "full_access", InboxId: inboxID,
+}) // reads and sends for that one inbox only; list rows carry InboxId
 client.ApiKeys.List(nil)
 client.ApiKeys.Remove(k.Id)
 ```
@@ -485,11 +617,17 @@ Method names and nesting match (`client.Emails.Send`, `client.Contacts`,
   per-call option structs.
 - **Template sends** (`SendEmailRequest.Template`) are passed through but
   answered with `422`: the API does not render stored templates yet.
+- **Received mail** is `client.Emails.Receiving` as in resend-go (`Get`,
+  `GetWithOptions`, `List`), but attachments hang off
+  `Emails.Receiving.Attachments.List/Get` and one `ReceivedEmail` type serves
+  list rows and full reads.
 - **Extensions with no Resend counterpart**: `Segments`, `Contacts.Batch`,
   `Contacts.CreatePreferencesLink`, `Webhooks.Rotate`, `Deliverability`,
-  `Usage`, `Emails.GetInsights`, the `unsubscribe` suppression origin, and
-  the `deliverability.*` / `quota.*` / `suppression.*` webhook events (plus
-  the `contact.*` events beyond Resend's created/updated/deleted).
+  `Usage`, `Emails.GetInsights`, the `unsubscribe` suppression origin, the
+  receiving long-poll, `Emails.Receiving.Reply/Forward/Remove`,
+  `Inboxes.Safety/Codes/Quarantine`, and the `deliverability.*` / `quota.*` /
+  `suppression.*` webhook events (plus the `contact.*` events beyond Resend's
+  created/updated/deleted).
 
 ## License
 

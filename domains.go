@@ -21,6 +21,8 @@ type CreateDomainRequest struct {
 
 // UpdateDomainRequest is the payload for Domains.Update. Nil pointers leave a
 // setting unchanged; ClearTrackingSubdomain sends null to drop the branded host.
+// ReceivingCatchAll keeps mail to addresses without an inbox instead of
+// refusing it (turning it on needs a paid plan on MillionSend Cloud).
 // Tls ("enforced" | "opportunistic") is not supported by the API: it is sent
 // through so the server answers 422 instead of a security setting being
 // dropped silently.
@@ -28,6 +30,7 @@ type UpdateDomainRequest struct {
 	OpenTracking      *bool  `json:"open_tracking,omitempty"`
 	ClickTracking     *bool  `json:"click_tracking,omitempty"`
 	TrackingSubdomain string `json:"tracking_subdomain,omitempty"`
+	ReceivingCatchAll *bool  `json:"receiving_catch_all,omitempty"`
 	Tls               string `json:"tls,omitempty"`
 
 	nulls []string
@@ -75,6 +78,7 @@ type Domain struct {
 	ClickTracking     bool               `json:"click_tracking"`
 	TrackingSubdomain string             `json:"tracking_subdomain"`
 	Capabilities      DomainCapabilities `json:"capabilities"`
+	ReceivingCatchAll bool               `json:"receiving_catch_all"`
 	Records           []DomainRecord     `json:"records"`
 }
 
