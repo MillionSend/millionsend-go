@@ -15,7 +15,8 @@
 //	})
 //
 // Every method returns (*T, error); on a non-2xx response the error is a
-// *MillionSendError carrying the API's { statusCode, name, message }.
+// *MillionSendError carrying the API's { statusCode, name, message } and the
+// retry-after header, when there is one, as RetryAfter.
 package millionsend
 
 import (
@@ -33,7 +34,7 @@ import (
 )
 
 // Version is the SDK version, reported in the User-Agent.
-const Version = "0.8.0"
+const Version = "0.9.0"
 
 const defaultBaseURL = "https://api.millionsend.com"
 
@@ -68,6 +69,7 @@ type Client struct {
 	Templates         *TemplatesService
 	Deliverability    *DeliverabilityService
 	Usage             *UsageService
+	Inboxes           *InboxesService
 }
 
 // NewClient returns a Client authenticating with apiKey. If apiKey is empty it
@@ -87,7 +89,10 @@ func NewClient(apiKey string) *Client {
 		UserAgent:  "millionsend-go/" + Version,
 		apiKey:     apiKey,
 	}
-	c.Emails = &EmailsService{client: c}
+	c.Emails = &EmailsService{
+		client:    c,
+		Receiving: &ReceivingService{client: c, Attachments: &ReceivingAttachmentsService{client: c}},
+	}
 	c.Batch = &BatchService{client: c}
 	c.Contacts = &ContactsService{
 		client:   c,
@@ -106,6 +111,15 @@ func NewClient(apiKey string) *Client {
 	c.Templates = &TemplatesService{client: c}
 	c.Deliverability = &DeliverabilityService{client: c}
 	c.Usage = &UsageService{client: c}
+	c.Inboxes = &InboxesService{
+		client:     c,
+		Safety:     &InboxSafetyService{client: c},
+		Codes:      &InboxCodesService{client: c},
+		Quarantine: &InboxQuarantineService{client: c},
+		Labels:     &InboxLabelsService{client: c},
+		Threads:    &InboxThreadsService{client: c, Emails: &InboxThreadEmailsService{client: c}},
+		Drafts:     &InboxDraftsService{client: c},
+	}
 	return c
 }
 
@@ -165,15 +179,19 @@ const (
 
 // RequestOption configures a single request. Emails.Send, Batch.Send,
 // Contacts.Batch.Create and Contacts.Batch.Get take them; Contacts.List and
-// Segments.ListContacts take WithInclude; Contacts.Remove takes WithErase.
+// Segments.ListContacts take WithInclude; Contacts.Remove takes WithErase;
+// the receiving and inbox replies, forwards and draft sends take
+// WithIdempotencyKey; Inboxes.Threads.Emails.List and Get take
+// WithIncludeQuarantined.
 type RequestOption func(*requestConfig)
 
 type requestConfig struct {
-	idempotencyKey  string
-	batchValidation BatchValidationMode
-	onConflict      OnConflict
-	include         []ContactInclude
-	erase           bool
+	idempotencyKey     string
+	batchValidation    BatchValidationMode
+	onConflict         OnConflict
+	include            []ContactInclude
+	erase              bool
+	includeQuarantined bool
 }
 
 // WithIdempotencyKey attaches an Idempotency-Key header to a send.
@@ -206,6 +224,13 @@ func WithErase() RequestOption {
 	return func(c *requestConfig) { c.erase = true }
 }
 
+// WithIncludeQuarantined sets the include_quarantined query of
+// Inboxes.Threads.Emails.List and Get: messages held for screening or in
+// quarantine are read too (full-access keys not scoped to an inbox).
+func WithIncludeQuarantined() RequestOption {
+	return func(c *requestConfig) { c.includeQuarantined = true }
+}
+
 func buildConfig(opts []RequestOption) requestConfig {
 	var cfg requestConfig
 	for _, o := range opts {
@@ -215,7 +240,11 @@ func buildConfig(opts []RequestOption) requestConfig {
 }
 
 // ListOptions holds the keyset pagination params shared by every list endpoint.
-// After and Before are mutually exclusive; a zero Limit uses the API default.
+// Lists are newest first unless their method says otherwise: After takes the
+// last id of a page and pages toward older items, Before takes the first id
+// and pages toward newer ones (each page still newest first), and HasMore
+// refers to that direction. After and Before are mutually exclusive; a zero
+// Limit uses the API default.
 type ListOptions struct {
 	Limit  int
 	After  string
@@ -239,6 +268,34 @@ func (o *ListOptions) values() url.Values {
 	return v
 }
 
+// setQuery adds a query param unless its value is empty ("", 0, false, a nil
+// *bool or no items). Lists go comma-joined: the inbox endpoints read CSV and
+// answer 422 to a repeated param.
+func setQuery(v url.Values, key string, value any) {
+	switch x := value.(type) {
+	case string:
+		if x != "" {
+			v.Set(key, x)
+		}
+	case int:
+		if x > 0 {
+			v.Set(key, strconv.Itoa(x))
+		}
+	case bool:
+		if x {
+			v.Set(key, "true")
+		}
+	case *bool:
+		if x != nil {
+			v.Set(key, strconv.FormatBool(*x))
+		}
+	case []string:
+		if len(x) > 0 {
+			v.Set(key, strings.Join(x, ","))
+		}
+	}
+}
+
 // ListResponse is the { object, data, has_more } envelope common to the
 // paginated list endpoints.
 type ListResponse[T any] struct {
@@ -248,10 +305,14 @@ type ListResponse[T any] struct {
 }
 
 // BatchError is one failed item of a permissive-mode batch (Batch.Send,
-// Contacts.Batch.Create), by position in the request array.
+// Contacts.Batch.Create), by position in the request array. On
+// Contacts.Batch.Create, StatusCode and Name are what strict mode would answer
+// for the item; Batch.Send leaves them 0 and "".
 type BatchError struct {
-	Index   int    `json:"index"`
-	Message string `json:"message"`
+	Index      int    `json:"index"`
+	StatusCode int    `json:"statusCode"`
+	Name       string `json:"name"`
+	Message    string `json:"message"`
 }
 
 // Ptr returns a pointer to v — handy for the optional *string / *bool fields on
@@ -282,9 +343,22 @@ type requestParams struct {
 	query           url.Values
 	idempotencyKey  string
 	batchValidation BatchValidationMode
+	// wait is how long a long-poll may stay open on the server; the client
+	// timeout is stretched by it so the wait can run its course.
+	wait time.Duration
+	// status, when set, receives the HTTP status of a 2xx response.
+	status *int
 }
 
 func (c *Client) do(ctx context.Context, p requestParams, out any) error {
+	// URL normalization resolves an empty, "." or ".." segment away, so an id
+	// such as ".." would send the request to another resource
+	// (DELETE /inboxes/{id}/labels/.. deletes the inbox).
+	for _, segment := range strings.Split(p.path, "/")[1:] {
+		if segment == "" || segment == "." || segment == ".." {
+			return &MillionSendError{Name: "validation_error", Message: `an id in the request path is empty, "." or ".."`}
+		}
+	}
 	var bodyReader io.Reader
 	hasBody := p.body != nil && p.method != http.MethodGet && p.method != http.MethodDelete
 	if hasBody {
@@ -325,7 +399,13 @@ func (c *Client) do(ctx context.Context, p requestParams, out any) error {
 		req.Header.Set("x-batch-validation", string(p.batchValidation))
 	}
 
-	resp, err := c.HTTPClient.Do(req)
+	httpClient := c.HTTPClient
+	if p.wait > 0 && httpClient.Timeout > 0 {
+		stretched := *httpClient
+		stretched.Timeout += p.wait
+		httpClient = &stretched
+	}
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		// Never reached the API: StatusCode stays 0 (the wire's "statusCode: null").
 		return &MillionSendError{Name: "application_error", Message: err.Error()}
@@ -338,7 +418,14 @@ func (c *Client) do(ctx context.Context, p requestParams, out any) error {
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return parseError(data, resp.StatusCode)
+		e := parseError(data, resp.StatusCode)
+		if s, err := strconv.Atoi(resp.Header.Get("Retry-After")); err == nil && s >= 0 {
+			e.RetryAfter = &s
+		}
+		return e
+	}
+	if p.status != nil {
+		*p.status = resp.StatusCode
 	}
 
 	if out != nil && len(data) > 0 {
@@ -354,6 +441,38 @@ func doJSON[T any](c *Client, ctx context.Context, p requestParams) (*T, error) 
 	out := new(T)
 	if err := c.do(ctx, p, out); err != nil {
 		return nil, err
+	}
+	return out, nil
+}
+
+// SendOutcome is the result of a reply, a forward or a draft send: exactly
+// one field is set. Sent is the email that went out (HTTP 200); Draft is set
+// instead when the inbox's rules held the message for a person to approve
+// (HTTP 202), its ApprovalReasons saying why.
+type SendOutcome[T any] struct {
+	Sent  *T
+	Draft *InboxDraft
+}
+
+// doOutcome runs a send whose 200 body is a T and whose 202 body is a Draft.
+func doOutcome[T any](c *Client, ctx context.Context, p requestParams) (*SendOutcome[T], error) {
+	var raw json.RawMessage
+	var status int
+	p.status = &status
+	if err := c.do(ctx, p, &raw); err != nil {
+		return nil, err
+	}
+	out := &SendOutcome[T]{}
+	var target any
+	if status == http.StatusAccepted {
+		out.Draft = new(InboxDraft)
+		target = out.Draft
+	} else {
+		out.Sent = new(T)
+		target = out.Sent
+	}
+	if err := json.Unmarshal(raw, target); err != nil {
+		return nil, &MillionSendError{Name: "application_error", Message: err.Error()}
 	}
 	return out, nil
 }

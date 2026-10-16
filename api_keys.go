@@ -8,11 +8,14 @@ import (
 
 // CreateApiKeyRequest is the payload for ApiKeys.Create. Permission is
 // "full_access" (default) or "sending_access"; DomainId restricts a
-// sending_access key to one domain.
+// sending_access key to one of the team's own domains (a Domains.List row with
+// Shared false; the shared row answers 422). InboxId makes a full_access key
+// that reads and sends for that one inbox (at most 5 per inbox).
 type CreateApiKeyRequest struct {
 	Name       string `json:"name"`
 	Permission string `json:"permission,omitempty"`
 	DomainId   string `json:"domain_id,omitempty"`
+	InboxId    string `json:"inbox_id,omitempty"`
 }
 
 // CreateApiKeyResponse is returned by ApiKeys.Create. Token is shown only here.
@@ -21,12 +24,14 @@ type CreateApiKeyResponse struct {
 	Token string `json:"token"`
 }
 
-// ApiKey is a row from ApiKeys.List (never the token).
+// ApiKey is a row from ApiKeys.List (never the token). InboxId is set for a
+// key restricted to one inbox.
 type ApiKey struct {
 	Id         string  `json:"id"`
 	Name       string  `json:"name"`
 	CreatedAt  string  `json:"created_at"`
 	LastUsedAt *string `json:"last_used_at"`
+	InboxId    *string `json:"inbox_id"`
 }
 
 // RemoveApiKeyResponse is returned by ApiKeys.Remove.

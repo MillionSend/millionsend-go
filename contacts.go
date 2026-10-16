@@ -187,7 +187,8 @@ type BatchContactsCounts struct {
 }
 
 // BatchContactsResponse is returned by Contacts.Batch.Create. Errors is
-// populated only in permissive mode.
+// populated only in permissive mode, each with the StatusCode and Name strict
+// mode would answer for the item.
 type BatchContactsResponse struct {
 	Data   []BatchContactResult `json:"data"`
 	Counts BatchContactsCounts  `json:"counts"`

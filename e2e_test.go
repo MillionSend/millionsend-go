@@ -20,7 +20,9 @@ func TestE2EContactLifecycle(t *testing.T) {
 	}
 	c := NewClient("") // reads key + base URL from the environment
 
-	email := fmt.Sprintf("sdk-e2e-%d@example.com", time.Now().UnixNano())
+	// POST /contacts refuses domains that can never receive mail, example.com
+	// included; the SES mailbox simulator accepts the address.
+	email := fmt.Sprintf("success+sdk-e2e-%d@simulator.amazonses.com", time.Now().UnixNano())
 	created, err := c.Contacts.Create(&CreateContactRequest{Email: email, FirstName: "Ada"})
 	require.NoError(t, err)
 	require.NotEmpty(t, created.Id)

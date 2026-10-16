@@ -21,6 +21,8 @@ type CreateDomainRequest struct {
 
 // UpdateDomainRequest is the payload for Domains.Update. Nil pointers leave a
 // setting unchanged; ClearTrackingSubdomain sends null to drop the branded host.
+// ReceivingCatchAll keeps mail to addresses without an inbox instead of
+// refusing it (turning it on needs a paid plan on MillionSend Cloud).
 // Tls ("enforced" | "opportunistic") is not supported by the API: it is sent
 // through so the server answers 422 instead of a security setting being
 // dropped silently.
@@ -28,6 +30,7 @@ type UpdateDomainRequest struct {
 	OpenTracking      *bool  `json:"open_tracking,omitempty"`
 	ClickTracking     *bool  `json:"click_tracking,omitempty"`
 	TrackingSubdomain string `json:"tracking_subdomain,omitempty"`
+	ReceivingCatchAll *bool  `json:"receiving_catch_all,omitempty"`
 	Tls               string `json:"tls,omitempty"`
 
 	nulls []string
@@ -57,6 +60,8 @@ type DomainRecord struct {
 }
 
 // DomainCapabilities reports what the domain may do ("enabled" | "disabled").
+// On the shared row, Sending is "disabled" while its SendingMode is
+// "receive_only".
 type DomainCapabilities struct {
 	Sending   string `json:"sending"`
 	Receiving string `json:"receiving"`
@@ -64,6 +69,17 @@ type DomainCapabilities struct {
 
 // Domain is returned by Create, Get, Update and Verify, and is a List row
 // (rows carry no Object or Records).
+//
+// On an instance with a shared inbox domain, List ends with the team's
+// subdomain of it, "<team>.<shared domain>": the shared row, with Shared true
+// (false on the team's own domains, and on every row from a server before
+// v0.14.0). Its Id is the DomainId of the team's shared inboxes. Get returns
+// it with no Records, and Update, Verify and Remove answer 403 forbidden. It
+// sends only from an inbox's own address, so leave it out when picking a
+// sender domain. Only the shared row carries SendingMode, what its inboxes
+// may send ("open" starts conversations, "reply_only" replies inside threads,
+// "receive_only" sends nothing), and SendingModeReason, what holds it below
+// open ("plan" or "instance"; "" when open).
 type Domain struct {
 	Object            string             `json:"object"`
 	Id                string             `json:"id"`
@@ -75,6 +91,10 @@ type Domain struct {
 	ClickTracking     bool               `json:"click_tracking"`
 	TrackingSubdomain string             `json:"tracking_subdomain"`
 	Capabilities      DomainCapabilities `json:"capabilities"`
+	ReceivingCatchAll bool               `json:"receiving_catch_all"`
+	Shared            bool               `json:"shared"`
+	SendingMode       string             `json:"sending_mode"`
+	SendingModeReason string             `json:"sending_mode_reason"`
 	Records           []DomainRecord     `json:"records"`
 }
 
@@ -102,7 +122,8 @@ func (s *DomainsService) Get(id string) (*Domain, error) {
 	})
 }
 
-// List returns the team's domains, paginated. Pass nil for defaults.
+// List returns the team's domains, newest first, then the shared row. Pass
+// nil for defaults.
 func (s *DomainsService) List(opts *ListOptions) (*ListResponse[Domain], error) {
 	return doJSON[ListResponse[Domain]](s.client, context.Background(), requestParams{
 		method: http.MethodGet, path: "/domains", query: opts.values(),

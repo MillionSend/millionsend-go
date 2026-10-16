@@ -8,11 +8,13 @@ import (
 
 // CreateWebhookRequest is the payload for Webhooks.Create. Events are names
 // like "email.delivered" (see the README for the full set). SigningSecret
-// carries over an existing whsec_ secret instead of minting one.
+// carries over an existing whsec_ secret instead of minting one. InboxIds
+// limits inbox events and email.received to those inboxes.
 type CreateWebhookRequest struct {
 	Endpoint      string   `json:"endpoint"`
 	Events        []string `json:"events"`
 	SigningSecret string   `json:"signing_secret,omitempty"`
+	InboxIds      []string `json:"inbox_ids,omitempty"`
 }
 
 // CreateWebhookResponse is returned by Webhooks.Create.
@@ -26,6 +28,7 @@ type CreateWebhookResponse struct {
 // and is a List row (without them). Status is "enabled" or "disabled".
 // PreviousSecretExpiresAt is set while a rotation's overlap window is open:
 // until then deliveries are also signed with the secret this one replaced.
+// InboxIds is nil when the endpoint takes events of every inbox.
 type Webhook struct {
 	Object                  string   `json:"object"`
 	Id                      string   `json:"id"`
@@ -35,6 +38,7 @@ type Webhook struct {
 	CreatedAt               string   `json:"created_at"`
 	SigningSecret           string   `json:"signing_secret,omitempty"`
 	PreviousSecretExpiresAt *string  `json:"previous_secret_expires_at,omitempty"`
+	InboxIds                []string `json:"inbox_ids"`
 }
 
 // RotateWebhookSecretRequest is the payload for Webhooks.Rotate. SigningSecret
@@ -57,11 +61,25 @@ type RotateWebhookSecretResponse struct {
 }
 
 // UpdateWebhookRequest is the payload for Webhooks.Update; empty fields are
-// left unchanged.
+// left unchanged. ClearInboxIds sends inbox_ids as null: events of every inbox.
 type UpdateWebhookRequest struct {
 	Endpoint string   `json:"endpoint,omitempty"`
 	Events   []string `json:"events,omitempty"`
 	Status   string   `json:"status,omitempty"`
+	InboxIds []string `json:"inbox_ids,omitempty"`
+
+	nulls []string
+}
+
+// ClearInboxIds sends inbox_ids as null, so the endpoint takes events of every inbox.
+func (r *UpdateWebhookRequest) ClearInboxIds() {
+	r.nulls = append(r.nulls, "inbox_ids")
+}
+
+// MarshalJSON adds the cleared fields as explicit nulls.
+func (r UpdateWebhookRequest) MarshalJSON() ([]byte, error) {
+	type plain UpdateWebhookRequest
+	return marshalWithNulls(plain(r), r.nulls)
 }
 
 // WebhookId is returned by Webhooks.Update.

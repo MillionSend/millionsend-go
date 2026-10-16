@@ -21,6 +21,7 @@ type Usage struct {
 type UsageLimits struct {
 	EmailsPerDay *int64 `json:"emails_per_day"`
 	Domains      *int   `json:"domains"`
+	Inboxes      *int   `json:"inboxes"`
 }
 
 // UsageToday is the current UTC day's accepted send count and when it resets.

@@ -3,8 +3,11 @@ package millionsend
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -18,7 +21,7 @@ func TestUserAgentCarriesVersion(t *testing.T) {
 	c, rec := mockServer(t, 200, anyOK)
 	_, err := c.Usage.Get()
 	require.NoError(t, err)
-	assert.Equal(t, "millionsend-go/0.8.0", rec.Header.Get("User-Agent"))
+	assert.Equal(t, "millionsend-go/0.9.0", rec.Header.Get("User-Agent"))
 }
 
 func TestSendFullWireBody(t *testing.T) {
@@ -86,8 +89,7 @@ func TestBatchValidationHeaderAndErrors(t *testing.T) {
 	assert.Equal(t, "b-1", rec.Header.Get("Idempotency-Key"))
 	require.Len(t, res.Data, 1)
 	require.Len(t, res.Errors, 1)
-	assert.Equal(t, 1, res.Errors[0].Index)
-	assert.Equal(t, "emails.1: invalid to", res.Errors[0].Message)
+	assert.Equal(t, BatchError{Index: 1, Message: "emails.1: invalid to"}, res.Errors[0])
 
 	// Functional-option form.
 	_, err = c.Batch.Send([]*SendEmailRequest{sampleEmail()}, WithBatchValidation(BatchValidationStrict))
@@ -178,7 +180,7 @@ func TestContactsBatchCreate(t *testing.T) {
 	c, rec := mockServer(t, 200, `{
 		"data":[{"object":"contact","index":0,"id":"c1","status":"created"},{"object":"contact","index":2,"id":"c2","status":"updated"}],
 		"counts":{"created":1,"updated":1,"skipped":0,"failed":1},
-		"errors":[{"index":1,"message":"contacts.1: invalid email"}]}`)
+		"errors":[{"index":1,"statusCode":422,"name":"validation_error","message":"contacts.1: invalid email"}]}`)
 	res, err := c.Contacts.Batch.Create([]*CreateContactRequest{
 		{Email: "a@x.dev"}, {Email: "nope"}, {Email: "b@x.dev", FirstName: "B"},
 	}, WithOnConflict(OnConflictUpsert), WithBatchValidation(BatchValidationPermissive))
@@ -192,7 +194,7 @@ func TestContactsBatchCreate(t *testing.T) {
 	assert.Equal(t, BatchContactResult{Object: "contact", Index: 2, Id: "c2", Status: "updated"}, res.Data[1])
 	assert.Equal(t, BatchContactsCounts{Created: 1, Updated: 1, Skipped: 0, Failed: 1}, res.Counts)
 	require.Len(t, res.Errors, 1)
-	assert.Equal(t, BatchError{Index: 1, Message: "contacts.1: invalid email"}, res.Errors[0])
+	assert.Equal(t, BatchError{Index: 1, StatusCode: 422, Name: "validation_error", Message: "contacts.1: invalid email"}, res.Errors[0])
 
 	// Defaults: no query, no header.
 	_, err = c.Contacts.Batch.CreateWithContext(context.Background(), []*CreateContactRequest{{Email: "a@x.dev"}})
@@ -477,6 +479,49 @@ func TestDomains(t *testing.T) {
 	assert.Equal(t, "x.dev", list.Data[0].Name)
 }
 
+func TestDomainsSharedRow(t *testing.T) {
+	c, rec := mockServer(t, 200, `{"object":"domain","id":"sd1","name":"acme.agents.example","status":"verified",
+		"created_at":"2026-10-12T09:00:00.000Z","region":"us-east-1","open_tracking":false,"click_tracking":false,
+		"tracking_subdomain":null,"capabilities":{"sending":"enabled","receiving":"enabled"},"receiving_catch_all":false,
+		"shared":true,"sending_mode":"reply_only","sending_mode_reason":"plan","records":[]}`)
+	d, err := c.Domains.Get("sd1")
+	require.NoError(t, err)
+	assert.Equal(t, "/domains/sd1", rec.Path)
+	assert.Equal(t, Domain{
+		Object: "domain", Id: "sd1", Name: "acme.agents.example", Status: "verified", CreatedAt: "2026-10-12T09:00:00.000Z",
+		Region: "us-east-1", Capabilities: DomainCapabilities{Sending: "enabled", Receiving: "enabled"},
+		Shared: true, SendingMode: "reply_only", SendingModeReason: "plan", Records: []DomainRecord{},
+	}, *d)
+
+	// Own domains carry shared: false and no sending_mode; rows from a server
+	// before v0.14.0 carry no shared at all; the shared row comes last, and a
+	// mode this SDK never saw still decodes.
+	c, _ = mockServer(t, 200, `{"object":"list","has_more":false,"data":[
+		{"id":"d2","name":"acme.dev","status":"verified","shared":false},
+		{"id":"d1","name":"mail.acme.dev","status":"verified"},
+		{"id":"sd1","name":"acme.agents.example","status":"verified","shared":true,
+		 "sending_mode":"paused","sending_mode_reason":null}]}`)
+	list, err := c.Domains.List(nil)
+	require.NoError(t, err)
+	require.Len(t, list.Data, 3)
+	for _, own := range list.Data[:2] {
+		assert.False(t, own.Shared)
+		assert.Empty(t, own.SendingMode)
+		assert.Empty(t, own.SendingModeReason)
+	}
+	assert.True(t, list.Data[2].Shared)
+	assert.Equal(t, "paused", list.Data[2].SendingMode)
+	assert.Empty(t, list.Data[2].SendingModeReason)
+
+	c, _ = mockServer(t, 403, `{"statusCode":403,"name":"forbidden",
+		"message":"acme.agents.example is your team's subdomain of the shared domain: it can't be changed or deleted"}`)
+	_, err = c.Domains.Update("sd1", &UpdateDomainRequest{OpenTracking: Ptr(true)})
+	var mse *MillionSendError
+	require.ErrorAs(t, err, &mse)
+	assert.Equal(t, 403, mse.StatusCode)
+	assert.Equal(t, "forbidden", mse.Name)
+}
+
 func TestWebhooks(t *testing.T) {
 	c, rec := mockServer(t, 200, `{"object":"webhook","id":"w1","signing_secret":"whsec_abc"}`)
 	created, err := c.Webhooks.Create(&CreateWebhookRequest{
@@ -741,4 +786,539 @@ func TestUnsupportedFieldsPassThrough(t *testing.T) {
 	_, err = c.Domains.Update("d1", &UpdateDomainRequest{Tls: "enforced", OpenTracking: Ptr(true)})
 	require.NoError(t, err)
 	assert.JSONEq(t, `{"tls":"enforced","open_tracking":true}`, string(rec.Body))
+}
+
+// Fixtures in the shapes of the inbox wire contract: Resend's fields plus
+// MillionSend's extension keys.
+const draftJSON = `{"object":"inbox_draft","id":"d1","type":"reply","to":["ada@x.dev"],"cc":[],"bcc":[],
+	"subject":"Re: Hi","html":null,"text":"Thanks","thread_id":"t1","reply_to_email_id":"m1","email_id":null,
+	"created_at":"2026-10-12T10:00:00.000Z","updated_at":"2026-10-12T10:00:00.000Z","status":"pending_approval",
+	"approval_reasons":["send_policy","ramp"],"forward":false,"decided_by":null,"decided_at":null,
+	"expires_at":"2026-10-19T10:00:00.000Z"}`
+
+const inboxJSON = `{"object":"inbox","id":"i1","name":"Signup bot","email_address":"signup-bot-7f3k@acme.agents.example",
+	"domain_id":"sd1","receiving_address":null,"from_name":null,"unread":2,"drafts":1,
+	"last_received":"2026-10-12T10:00:00.000Z","created_at":"2026-10-12T09:00:00.000Z","kind":"agent","shared":true,
+	"expires_at":null,"quarantined":1,"pending_approval":1}`
+
+func TestReceivingListLongPollQueryAndHeld(t *testing.T) {
+	c, rec := mockServer(t, 200, `{"object":"list","has_more":false,"data":[{"id":"r1","from":"a@x.dev",
+		"screening":{"verdict":"clean","sender_trust":"external"},"extracted":{"kinds":["code"]},"read":false,
+		"inbox_id":"i1","thread_id":"t1","spam_verdict":"pass"}],
+		"held":[{"id":"r2","inbox_id":"i1","reason":"quarantined","quarantine_reason":"not_allowlisted",
+		"created_at":"2026-10-12T10:00:00.000Z"},{"id":"r3","inbox_id":null,"reason":"pending","quarantine_reason":null,
+		"created_at":"2026-10-12T10:00:01.000Z"}]}`)
+	res, err := c.Emails.Receiving.List(&ListReceivedEmailsOptions{
+		Limit: 10, Before: "r0", Wait: 30, Since: "2026-10-12T00:00:00Z", InboxId: "i1", To: "bot@x.dev",
+		From: "stripe.com", SubjectContains: "code", Unread: Ptr(false), IncludeQuarantined: true,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, http.MethodGet, rec.Method)
+	assert.Equal(t, "/emails/receiving", rec.Path)
+	assert.Equal(t, "before=r0&from=stripe.com&inbox_id=i1&include_quarantined=true&limit=10"+
+		"&since=2026-10-12T00%3A00%3A00Z&subject_contains=code&to=bot%40x.dev&unread=false&wait=30", rec.RawQuery)
+	require.Len(t, res.Data, 1)
+	assert.Equal(t, "external", res.Data[0].Screening.SenderTrust)
+	assert.Equal(t, []string{"code"}, res.Data[0].Extracted.Kinds)
+	assert.False(t, *res.Data[0].Read)
+	assert.Equal(t, []HeldEmail{
+		{Id: "r2", InboxId: "i1", Reason: "quarantined", QuarantineReason: "not_allowlisted", CreatedAt: "2026-10-12T10:00:00.000Z"},
+		{Id: "r3", Reason: "pending", CreatedAt: "2026-10-12T10:00:01.000Z"},
+	}, res.Held)
+
+	_, err = c.Emails.Receiving.List(nil)
+	require.NoError(t, err)
+	assert.Empty(t, rec.RawQuery)
+
+	_, err = c.Emails.Receiving.List(&ListReceivedEmailsOptions{Quarantined: true})
+	require.NoError(t, err)
+	assert.Equal(t, "quarantined=true", rec.RawQuery)
+
+	// unread without inbox_id: an inbox-scoped key reads its own inbox.
+	_, err = c.Emails.Receiving.List(&ListReceivedEmailsOptions{Unread: Ptr(false)})
+	require.NoError(t, err)
+	assert.Equal(t, "unread=false", rec.RawQuery)
+
+	// An inbox the key can't reach is a 404 at once, even on a long-poll.
+	c, rec = mockServer(t, 404, `{"statusCode":404,"name":"not_found","message":"Inbox not found."}`)
+	_, err = c.Emails.Receiving.List(&ListReceivedEmailsOptions{InboxId: "i9", Wait: 30})
+	var mse *MillionSendError
+	require.ErrorAs(t, err, &mse)
+	assert.Equal(t, 404, mse.StatusCode)
+	assert.Equal(t, "not_found", mse.Name)
+	assert.Equal(t, "inbox_id=i9&wait=30", rec.RawQuery)
+}
+
+// A long-poll outlives the client's own timeout by the time it may wait.
+func TestLongPollStretchesTheClientTimeout(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(150 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"object":"list","has_more":false,"data":[],"held":[]}`)
+	}))
+	t.Cleanup(srv.Close)
+	c := NewClient("ms_test")
+	c.BaseURL = srv.URL
+	c.HTTPClient = &http.Client{Timeout: 50 * time.Millisecond}
+
+	_, err := c.Emails.Receiving.List(nil)
+	require.Error(t, err)
+
+	_, err = c.Emails.Receiving.List(&ListReceivedEmailsOptions{Wait: 1})
+	require.NoError(t, err)
+	_, err = c.Inboxes.Codes.Latest("i1", &LatestCodeOptions{Wait: 1})
+	require.NoError(t, err)
+	assert.Equal(t, 50*time.Millisecond, c.HTTPClient.Timeout)
+}
+
+func TestReceivingGetDecodesExtensionsAndUnknownValues(t *testing.T) {
+	c, rec := mockServer(t, 200, `{"object":"email","id":"r1","from":"noreply@github.com","to":["bot@acme.dev"],
+		"subject":"Your code","html":"<p>482913</p>","html_format":"cid","text":"Your code is 482913",
+		"headers":{"from":"GitHub <noreply@github.com>"},"authentication":{"spf":"pass","dkim":"pass","dmarc":"gray"},
+		"raw":null,"attachments":[{"id":"a1","filename":null,"content_type":"image/png","content_id":"logo",
+		"content_disposition":"inline","size":120}],"inbox_id":"i1","thread_id":"t1",
+		"inboxes":[{"inbox_id":"i1","thread_id":"t1","verdict":"clean"}],
+		"screening":{"verdict":"clean","sender_trust":"external","quarantine_reason":null,"reasons":["targets_agent"],
+		"injection_score":3,"phishing_score":null,"hidden_text_removed":true},
+		"spam_verdict":"gray","spam_score":31,"virus_verdict":"processing_failed","virus_signature":null,
+		"extracted_text":"Your code is 482913",
+		"extracted":{"kinds":["code"],"code":"482913","link":null,"link_domain_matches_sender":null,"ambiguous":false},
+		"brand_new":{"verdict":"cosmic"}}`)
+	got, err := c.Emails.Receiving.GetWithOptions(context.Background(), "r1", &GetReceivedEmailParams{HtmlFormat: Ptr("cid")})
+	require.NoError(t, err)
+	assert.Equal(t, "/emails/receiving/r1", rec.Path)
+	assert.Equal(t, "html_format=cid", rec.RawQuery)
+	assert.Nil(t, got.Raw)
+	assert.Equal(t, "gray", got.Authentication.Dmarc)
+	assert.Equal(t, "GitHub <noreply@github.com>", got.Headers["from"])
+	assert.Equal(t, EmailAttachment{Id: "a1", ContentType: "image/png", ContentId: "logo", ContentDisposition: "inline", Size: 120}, got.Attachments[0])
+	assert.Equal(t, []ReceivedEmailInbox{{InboxId: "i1", ThreadId: "t1", Verdict: "clean"}}, got.Inboxes)
+	assert.Equal(t, 3, *got.Screening.InjectionScore)
+	assert.Nil(t, got.Screening.PhishingScore)
+	assert.True(t, got.Screening.HiddenTextRemoved)
+	assert.Equal(t, "processing_failed", got.VirusVerdict)
+	assert.Equal(t, 31, *got.SpamScore)
+	assert.Equal(t, "482913", got.Extracted.Code)
+	assert.Nil(t, got.Extracted.LinkDomainMatchesSender)
+
+	_, err = c.Emails.Receiving.Get("r1")
+	require.NoError(t, err)
+	assert.Empty(t, rec.RawQuery)
+}
+
+func TestReceivingReplySentOrDrafted(t *testing.T) {
+	c, rec := mockServer(t, 200, `{"object":"email","id":"e9","thread_id":"t1","inbox_id":"i1"}`)
+	res, err := c.Emails.Receiving.Reply("r1", &ReplyReceivedEmailRequest{
+		Text: "Thanks", Html: "<p>Thanks</p>", Subject: "Re: Hi", Cc: []string{"c@x.dev"}, Bcc: []string{"b@x.dev"},
+		ReplyAll: true, RequiresApproval: true, From: "bot@acme.dev", InboxId: "i1",
+	}, WithIdempotencyKey("rk-1"))
+	require.NoError(t, err)
+	assert.Equal(t, http.MethodPost, rec.Method)
+	assert.Equal(t, "/emails/receiving/r1/reply", rec.Path)
+	assert.Equal(t, "rk-1", rec.Header.Get("Idempotency-Key"))
+	assert.JSONEq(t, `{"text":"Thanks","html":"<p>Thanks</p>","subject":"Re: Hi","cc":["c@x.dev"],"bcc":["b@x.dev"],
+		"reply_all":true,"requires_approval":true,"from":"bot@acme.dev","inbox_id":"i1"}`, string(rec.Body))
+	require.NotNil(t, res.Sent)
+	assert.Nil(t, res.Draft)
+	assert.Equal(t, ReceivedEmailSent{Object: "email", Id: "e9", ThreadId: "t1", InboxId: "i1"}, *res.Sent)
+
+	c, rec = mockServer(t, 202, draftJSON)
+	res, err = c.Emails.Receiving.Reply("r1", &ReplyReceivedEmailRequest{Text: "Thanks"})
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"text":"Thanks"}`, string(rec.Body))
+	assert.Empty(t, rec.Header.Get("Idempotency-Key"))
+	assert.Nil(t, res.Sent)
+	require.NotNil(t, res.Draft)
+	assert.Equal(t, "pending_approval", res.Draft.Status)
+	assert.Equal(t, []string{"send_policy", "ramp"}, res.Draft.ApprovalReasons)
+}
+
+func TestReceivingForwardRemoveAndAttachments(t *testing.T) {
+	c, rec := mockServer(t, 200, `{"object":"email","id":"e9","thread_id":null,"inbox_id":null}`)
+	res, err := c.Emails.Receiving.Forward("r1", &ForwardReceivedEmailRequest{
+		To: []string{"ops@acme.dev"}, Text: "FYI", Mode: "attachment", From: "me@acme.dev",
+	}, WithIdempotencyKey("fk-1"))
+	require.NoError(t, err)
+	assert.Equal(t, "/emails/receiving/r1/forward", rec.Path)
+	assert.Equal(t, "fk-1", rec.Header.Get("Idempotency-Key"))
+	assert.JSONEq(t, `{"to":["ops@acme.dev"],"text":"FYI","mode":"attachment","from":"me@acme.dev"}`, string(rec.Body))
+	assert.Equal(t, "", res.Sent.ThreadId)
+
+	c, rec = mockServer(t, 200, `{"object":"email","id":"r1","deleted":true}`)
+	rm, err := c.Emails.Receiving.Remove("r1")
+	require.NoError(t, err)
+	assert.Equal(t, http.MethodDelete, rec.Method)
+	assert.Equal(t, "/emails/receiving/r1", rec.Path)
+	assert.True(t, rm.Deleted)
+
+	c, rec = mockServer(t, 200, `{"object":"list","has_more":false,"data":[{"id":"a1","filename":"invoice.pdf","size":48213,
+		"content_type":"application/pdf","content_disposition":"attachment","download_url":"https://api.test/d/a1",
+		"expires_at":"2026-10-12T11:00:00.000Z"}]}`)
+	list, err := c.Emails.Receiving.Attachments.List("r1", &ListOptions{Limit: 5})
+	require.NoError(t, err)
+	assert.Equal(t, "/emails/receiving/r1/attachments", rec.Path)
+	assert.Equal(t, "limit=5", rec.RawQuery)
+	assert.Equal(t, "https://api.test/d/a1", list.Data[0].DownloadUrl)
+
+	_, err = c.Emails.Receiving.Attachments.Get("r1", "a1")
+	require.NoError(t, err)
+	assert.Equal(t, "/emails/receiving/r1/attachments/a1", rec.Path)
+}
+
+func TestInboxesCreateListGetUpdateRemove(t *testing.T) {
+	c, rec := mockServer(t, 201, inboxJSON)
+	inbox, err := c.Inboxes.Create(nil)
+	require.NoError(t, err)
+	assert.Equal(t, http.MethodPost, rec.Method)
+	assert.Equal(t, "/inboxes", rec.Path)
+	assert.JSONEq(t, `{}`, string(rec.Body))
+	assert.Equal(t, Inbox{
+		Object: "inbox", Id: "i1", Name: "Signup bot", EmailAddress: "signup-bot-7f3k@acme.agents.example", DomainId: "sd1",
+		Unread: 2, Drafts: 1, LastReceived: "2026-10-12T10:00:00.000Z", CreatedAt: "2026-10-12T09:00:00.000Z",
+		Kind: "agent", Shared: true, Quarantined: 1, PendingApproval: 1,
+	}, *inbox)
+
+	_, err = c.Inboxes.Create(&CreateInboxRequest{
+		EmailAddress: "bot@acme.dev", Name: "Bot", FromName: "Acme Bot", Forwarding: true, Kind: "human", ExpiresIn: "7d",
+		Safety: &InboxSafetyUpdate{AcceptFrom: "allowlist", Allowlist: Ptr([]string{"*@stripe.com"}), Screening: Ptr(false)},
+	})
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"email_address":"bot@acme.dev","name":"Bot","from_name":"Acme Bot","forwarding":true,"kind":"human",
+		"expires_in":"7d","safety":{"accept_from":"allowlist","allowlist":["*@stripe.com"],"screening":false}}`, string(rec.Body))
+
+	_, err = c.Inboxes.List(&ListInboxesOptions{Kind: "agent", Limit: 2})
+	require.NoError(t, err)
+	assert.Equal(t, "/inboxes", rec.Path)
+	assert.Equal(t, "kind=agent&limit=2", rec.RawQuery)
+
+	_, err = c.Inboxes.Get("bot+sales@acme.dev")
+	require.NoError(t, err)
+	assert.Equal(t, http.MethodGet, rec.Method)
+	assert.Equal(t, "/inboxes/bot+sales@acme.dev", rec.Path)
+
+	upd := &UpdateInboxRequest{Name: "Renamed", FromName: Ptr("")}
+	upd.ClearExpiresIn()
+	_, err = c.Inboxes.Update("i1", upd)
+	require.NoError(t, err)
+	assert.Equal(t, http.MethodPatch, rec.Method)
+	assert.Equal(t, "/inboxes/i1", rec.Path)
+	assert.JSONEq(t, `{"name":"Renamed","from_name":"","expires_in":null}`, string(rec.Body))
+
+	c, rec = mockServer(t, 200, `{"object":"inbox","id":"i1","deleted":true}`)
+	rm, err := c.Inboxes.Remove("i1")
+	require.NoError(t, err)
+	assert.Equal(t, http.MethodDelete, rec.Method)
+	assert.Equal(t, "/inboxes/i1", rec.Path)
+	assert.True(t, rm.Deleted)
+}
+
+func TestInboxesCreateUsernameAndDomainId(t *testing.T) {
+	c, rec := mockServer(t, 201, inboxJSON)
+	_, err := c.Inboxes.Create(&CreateInboxRequest{Username: "signup-bot"})
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"username":"signup-bot"}`, string(rec.Body))
+
+	_, err = c.Inboxes.Create(&CreateInboxRequest{DomainId: "sd1"})
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"domain_id":"sd1"}`, string(rec.Body))
+
+	_, err = c.Inboxes.Create(&CreateInboxRequest{DomainId: "d1", Username: "support"})
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"domain_id":"d1","username":"support"}`, string(rec.Body))
+}
+
+func TestInboxSafetyCodesAndQuarantine(t *testing.T) {
+	c, rec := mockServer(t, 200, `{"object":"inbox_safety","inbox_id":"i1","accept_from":"verified","allowlist":[],
+		"owner_addresses":["ops@acme.dev"],"screening":true,"extract_codes":true,"send_policy":"reply_only",
+		"require_approval":false,"private_codes":true,"send_cap":null,"forward_to":[]}`)
+	safety, err := c.Inboxes.Safety.Get("i1")
+	require.NoError(t, err)
+	assert.Equal(t, "/inboxes/i1/safety", rec.Path)
+	assert.Nil(t, safety.SendCap)
+	assert.Equal(t, []string{"ops@acme.dev"}, safety.OwnerAddresses)
+	assert.Equal(t, "reply_only", safety.SendPolicy)
+
+	upd := &InboxSafetyUpdate{Allowlist: Ptr([]string{}), RequireApproval: Ptr(true), SendPolicy: "allowlist"}
+	upd.ClearSendCap()
+	_, err = c.Inboxes.Safety.Update("i1", upd)
+	require.NoError(t, err)
+	assert.Equal(t, http.MethodPatch, rec.Method)
+	assert.JSONEq(t, `{"allowlist":[],"require_approval":true,"send_policy":"allowlist","send_cap":null}`, string(rec.Body))
+
+	c, rec = mockServer(t, 200, `{"object":"verification_code","status":"found","kind":"otp","code":"482913","url":null,
+		"link_domain_matches_sender":null,"email_id":"r1","from":"noreply@github.com",
+		"received_at":"2026-10-12T10:00:00.000Z","sender_trust":"external"}`)
+	code, err := c.Inboxes.Codes.Latest("i1", &LatestCodeOptions{From: "github.com", Wait: 20, MaxAge: 600})
+	require.NoError(t, err)
+	assert.Equal(t, "/inboxes/i1/codes/latest", rec.Path)
+	assert.Equal(t, "from=github.com&max_age=600&wait=20", rec.RawQuery)
+	assert.Equal(t, "482913", code.Code)
+	assert.Nil(t, code.LinkDomainMatchesSender)
+	_, err = c.Inboxes.Codes.Latest("i1", &LatestCodeOptions{Wait: 30, Since: "2026-10-16T12:00:00.000Z"})
+	require.NoError(t, err)
+	assert.Equal(t, "since=2026-10-16T12%3A00%3A00.000Z&wait=30", rec.RawQuery)
+	_, err = c.Inboxes.Codes.Latest("i1", nil)
+	require.NoError(t, err)
+	assert.Empty(t, rec.RawQuery)
+
+	c, rec = mockServer(t, 200, `{"object":"list","has_more":false,"data":[{"id":"r1","thread_id":"t1","from":"x@y.dev",
+		"subject":"Hi","received_at":"2026-10-12T10:00:00.000Z","quarantine_reason":"injection",
+		"sender_trust":"external","injection_score":97,"phishing_score":null,"virus_signature":null}]}`)
+	held, err := c.Inboxes.Quarantine.List("i1", &ListOptions{Limit: 5})
+	require.NoError(t, err)
+	assert.Equal(t, "/inboxes/i1/quarantine", rec.Path)
+	assert.Equal(t, "limit=5", rec.RawQuery)
+	assert.Equal(t, 97, *held.Data[0].InjectionScore)
+
+	c, rec = mockServer(t, 200, `{"object":"inbox_release","inbox_id":"i1","email_id":"r1",
+		"released_at":"2026-10-12T10:05:00.000Z","trusted_sender":"x@y.dev"}`)
+	rel, err := c.Inboxes.Quarantine.Release("i1", "r1", nil)
+	require.NoError(t, err)
+	assert.Equal(t, http.MethodPost, rec.Method)
+	assert.Equal(t, "/inboxes/i1/quarantine/r1/release", rec.Path)
+	assert.JSONEq(t, `{}`, string(rec.Body))
+	assert.Equal(t, "x@y.dev", rel.TrustedSender)
+	_, err = c.Inboxes.Quarantine.Release("i1", "r1", &ReleaseQuarantinedRequest{TrustSender: true})
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"trust_sender":true}`, string(rec.Body))
+}
+
+func TestInboxLabels(t *testing.T) {
+	c, rec := mockServer(t, 200, `{"object":"list","data":[{"id":"l1","name":"Billing","color":"#FFAA00","created_at":"2026-10-12T10:00:00.000Z"}]}`)
+	labels, err := c.Inboxes.Labels.List("i1")
+	require.NoError(t, err)
+	assert.Equal(t, "/inboxes/i1/labels", rec.Path)
+	assert.Equal(t, "#FFAA00", labels.Data[0].Color)
+
+	c, rec = mockServer(t, 201, `{"object":"inbox_label","id":"l1","name":"Billing","color":"#FFAA00","created_at":"2026-10-12T10:00:00.000Z"}`)
+	_, err = c.Inboxes.Labels.Create("i1", &CreateInboxLabelRequest{Name: "Billing"})
+	require.NoError(t, err)
+	assert.Equal(t, http.MethodPost, rec.Method)
+	assert.JSONEq(t, `{"name":"Billing"}`, string(rec.Body))
+
+	_, err = c.Inboxes.Labels.Update("i1", "l1", &UpdateInboxLabelRequest{Color: "#00AAFF"})
+	require.NoError(t, err)
+	assert.Equal(t, http.MethodPatch, rec.Method)
+	assert.Equal(t, "/inboxes/i1/labels/l1", rec.Path)
+	assert.JSONEq(t, `{"color":"#00AAFF"}`, string(rec.Body))
+
+	_, err = c.Inboxes.Labels.Remove("i1", "l1")
+	require.NoError(t, err)
+	assert.Equal(t, http.MethodDelete, rec.Method)
+	assert.Equal(t, "/inboxes/i1/labels/l1", rec.Path)
+}
+
+func TestInboxThreads(t *testing.T) {
+	c, rec := mockServer(t, 200, `{"object":"list","has_more":true,"data":[{"id":"t1","subject":"Invoice 42",
+		"from":"Stripe <billing@stripe.com>","to":["bot@acme.dev"],"cc":[],"bcc":[],
+		"labels":[{"id":"l1","name":"Billing","color":"#FFAA00"}],"message_count":2,"has_attachment":true,
+		"has_draft":false,"read":true,"quarantined":2,"received_at":"2026-10-12T10:00:00.000Z","folder":"quarantine"}]}`)
+	list, err := c.Inboxes.Threads.List("i1", &ListInboxThreadsOptions{
+		Folders: []string{"inbox", "archive"}, Labels: []string{"l1", "l2"}, Read: Ptr(false), IncludeQuarantined: true,
+		Limit: 20, After: "t0",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "/inboxes/i1/threads", rec.Path)
+	assert.Equal(t, "after=t0&folders=inbox%2Carchive&include_quarantined=true&labels=l1%2Cl2&limit=20&read=false", rec.RawQuery)
+	assert.Equal(t, "quarantine", list.Data[0].Folder) // an enum value this SDK never saw still decodes
+	assert.Equal(t, "Billing", list.Data[0].Labels[0].Name)
+	assert.Equal(t, 2, list.Data[0].Quarantined)
+
+	c, rec = mockServer(t, 200, `{"object":"list","has_more":false,"data":[{"id":"t1","matched_email_id":"m2",
+		"highlights":{"subject":["**Invoice** 42"]}}]}`)
+	found, err := c.Inboxes.Threads.Search("i1", &SearchInboxThreadsOptions{
+		Query: `"invoice 42" -spam`, From: []string{"stripe.com", "ada"}, To: []string{"bot@acme.dev"},
+		HasAttachment: Ptr(true), StartDate: "2026-10-01", EndDate: "2026-10-12", Folders: []string{"sent"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "/inboxes/i1/threads/search", rec.Path)
+	assert.Equal(t, "end_date=2026-10-12&folders=sent&from=stripe.com%2Cada&has_attachment=true"+
+		"&query=%22invoice+42%22+-spam&start_date=2026-10-01&to=bot%40acme.dev", rec.RawQuery)
+	assert.Equal(t, "m2", found.Data[0].MatchedEmailId)
+	assert.Equal(t, []string{"**Invoice** 42"}, found.Data[0].Highlights["subject"])
+	assert.Zero(t, found.Data[0].Quarantined)
+
+	c, rec = mockServer(t, 200, `{"object":"inbox_thread","id":"t1","subject":null,"folder":"archive","labels":[],"read":true,"quarantined":0}`)
+	th, err := c.Inboxes.Threads.Get("i1", "t1")
+	require.NoError(t, err)
+	assert.Equal(t, "/inboxes/i1/threads/t1", rec.Path)
+	assert.Equal(t, "archive", th.Folder)
+
+	_, err = c.Inboxes.Threads.Update("i1", "t1", &UpdateInboxThreadRequest{Read: Ptr(false), Folder: "archive", LabelId: "l1"})
+	require.NoError(t, err)
+	assert.Equal(t, http.MethodPatch, rec.Method)
+	assert.JSONEq(t, `{"read":false,"folder":"archive","label_id":"l1"}`, string(rec.Body))
+
+	c, rec = mockServer(t, 200, `{"object":"inbox_thread","id":"t1","deleted":false}`)
+	rm, err := c.Inboxes.Threads.Remove("i1", "t1")
+	require.NoError(t, err)
+	assert.Equal(t, http.MethodDelete, rec.Method)
+	assert.False(t, rm.Deleted)
+}
+
+func TestInboxThreadEmails(t *testing.T) {
+	c, rec := mockServer(t, 200, `{"object":"list","has_more":false,"data":[{"id":"m1","direction":"inbound",
+		"from":"Ada <ada@x.dev>","to":["bot@acme.dev"],"cc":[],"bcc":[],"reply_to":[],"subject":"Hi",
+		"message_id":"<a@x.dev>","html":null,"text":"Hello","attachments":[{"id":"a1","filename":null,"size":null}],
+		"read":false,"received_at":"2026-10-12T10:00:00.000Z","extracted_text":"Hello","spam_verdict":"pass",
+		"virus_verdict":"pass","screening":{"verdict":"suspicious","sender_trust":"unauthenticated","quarantine_reason":null,
+		"reasons":[],"injection_score":null,"phishing_score":null,"hidden_text_removed":false}}]}`)
+	list, err := c.Inboxes.Threads.Emails.List("i1", "t1", &ListOptions{After: "m0"})
+	require.NoError(t, err)
+	assert.Equal(t, "/inboxes/i1/threads/t1/emails", rec.Path)
+	assert.Equal(t, "after=m0", rec.RawQuery)
+	assert.Equal(t, "suspicious", list.Data[0].Screening.Verdict)
+	assert.Equal(t, EmailAttachment{Id: "a1"}, list.Data[0].Attachments[0])
+
+	_, err = c.Inboxes.Threads.Emails.Get("i1", "t1", "m1")
+	require.NoError(t, err)
+	assert.Equal(t, "/inboxes/i1/threads/t1/emails/m1", rec.Path)
+	assert.Empty(t, rec.RawQuery)
+
+	_, err = c.Inboxes.Threads.Emails.List("i1", "t1", nil, WithIncludeQuarantined())
+	require.NoError(t, err)
+	assert.Equal(t, "include_quarantined=true", rec.RawQuery)
+	_, err = c.Inboxes.Threads.Emails.List("i1", "t1", &ListOptions{Limit: 5}, WithIncludeQuarantined())
+	require.NoError(t, err)
+	assert.Equal(t, "include_quarantined=true&limit=5", rec.RawQuery)
+	_, err = c.Inboxes.Threads.Emails.Get("i1", "t1", "m1", WithIncludeQuarantined())
+	require.NoError(t, err)
+	assert.Equal(t, "include_quarantined=true", rec.RawQuery)
+
+	c, rec = mockServer(t, 200, `{"id":"m2","direction":"outbound","from":"Signup bot <bot@acme.dev>","to":["ada@x.dev"],
+		"cc":[],"bcc":[],"reply_to":[],"subject":"Re: Hi","message_id":null,"html":null,"text":"Thanks","attachments":[],
+		"read":true,"received_at":"2026-10-12T10:01:00.000Z","email_id":"m2","thread_id":"t1","inbox_id":"i1","status":"queued"}`)
+	res, err := c.Inboxes.Threads.Emails.Reply("i1", "t1", "m1", &ReplyInThreadRequest{Text: "Thanks", ReplyAll: true}, WithIdempotencyKey("tr-1"))
+	require.NoError(t, err)
+	assert.Equal(t, "/inboxes/i1/threads/t1/emails/m1/reply", rec.Path)
+	assert.Equal(t, "tr-1", rec.Header.Get("Idempotency-Key"))
+	assert.JSONEq(t, `{"text":"Thanks","reply_all":true}`, string(rec.Body))
+	assert.Equal(t, "m2", res.Sent.EmailId)
+	assert.Equal(t, "queued", res.Sent.Status)
+
+	c, rec = mockServer(t, 202, draftJSON)
+	res, err = c.Inboxes.Threads.Emails.Forward("i1", "t1", "m1", &ForwardInThreadRequest{To: []string{"ops@acme.dev"}, Subject: "Fwd: Hi", RequiresApproval: true})
+	require.NoError(t, err)
+	assert.Equal(t, "/inboxes/i1/threads/t1/emails/m1/forward", rec.Path)
+	assert.JSONEq(t, `{"to":["ops@acme.dev"],"subject":"Fwd: Hi","requires_approval":true}`, string(rec.Body))
+	assert.Nil(t, res.Sent)
+	assert.Equal(t, "d1", res.Draft.Id)
+}
+
+func TestInboxDrafts(t *testing.T) {
+	c, rec := mockServer(t, 200, `{"object":"list","has_more":false,"data":[{"id":"d1","type":"standalone","to":null,
+		"cc":[],"bcc":[],"subject":null,"snippet":"Hi Ada","thread_id":null,"reply_to_email_id":null,
+		"updated_at":"2026-10-12T10:00:00.000Z","status":"draft","approval_reasons":[]}]}`)
+	list, err := c.Inboxes.Drafts.List("i1", &ListOptions{Limit: 3})
+	require.NoError(t, err)
+	assert.Equal(t, "/inboxes/i1/drafts", rec.Path)
+	assert.Equal(t, "limit=3", rec.RawQuery)
+	assert.Nil(t, list.Data[0].To)
+	assert.Equal(t, "Hi Ada", list.Data[0].Snippet)
+
+	c, rec = mockServer(t, 201, draftJSON)
+	_, err = c.Inboxes.Drafts.Create("i1", &CreateInboxDraftRequest{
+		To: []string{"ada@x.dev"}, Subject: "Re: Hi", Text: "Thanks", ThreadId: "t1", ReplyToEmailId: "m1",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, http.MethodPost, rec.Method)
+	assert.JSONEq(t, `{"to":["ada@x.dev"],"subject":"Re: Hi","text":"Thanks","thread_id":"t1","reply_to_email_id":"m1"}`, string(rec.Body))
+
+	got, err := c.Inboxes.Drafts.Get("i1", "d1")
+	require.NoError(t, err)
+	assert.Equal(t, "/inboxes/i1/drafts/d1", rec.Path)
+	assert.Equal(t, "2026-10-19T10:00:00.000Z", got.ExpiresAt)
+
+	upd := &UpdateInboxDraftRequest{Html: "<p>Thanks</p>"}
+	upd.ClearSubject()
+	upd.ClearCc()
+	_, err = c.Inboxes.Drafts.Update("i1", "d1", upd)
+	require.NoError(t, err)
+	assert.Equal(t, http.MethodPatch, rec.Method)
+	assert.JSONEq(t, `{"html":"<p>Thanks</p>","subject":null,"cc":null}`, string(rec.Body))
+
+	body := &UpdateInboxDraftRequest{}
+	body.ClearBody()
+	_, err = c.Inboxes.Drafts.Update("i1", "d1", body)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"html":null,"text":null}`, string(rec.Body))
+
+	_, err = c.Inboxes.Drafts.Remove("i1", "d1")
+	require.NoError(t, err)
+	assert.Equal(t, http.MethodDelete, rec.Method)
+
+	_, err = c.Inboxes.Drafts.Reject("i1", "d1")
+	require.NoError(t, err)
+	assert.Equal(t, http.MethodPost, rec.Method)
+	assert.Equal(t, "/inboxes/i1/drafts/d1/reject", rec.Path)
+	assert.Empty(t, rec.Body)
+}
+
+func TestInboxDraftSendSentOrHeld(t *testing.T) {
+	c, rec := mockServer(t, 200, `{"object":"inbox_draft","id":"d1","thread_id":"t1","email_id":"e9"}`)
+	res, err := c.Inboxes.Drafts.Send("i1", "d1", WithIdempotencyKey("ds-1"))
+	require.NoError(t, err)
+	assert.Equal(t, http.MethodPost, rec.Method)
+	assert.Equal(t, "/inboxes/i1/drafts/d1/send", rec.Path)
+	assert.Equal(t, "ds-1", rec.Header.Get("Idempotency-Key"))
+	assert.Empty(t, rec.Body)
+	assert.Equal(t, InboxDraftSent{Object: "inbox_draft", Id: "d1", ThreadId: "t1", EmailId: "e9"}, *res.Sent)
+
+	c, _ = mockServer(t, 202, draftJSON)
+	res, err = c.Inboxes.Drafts.Send("i1", "d1")
+	require.NoError(t, err)
+	assert.Nil(t, res.Sent)
+	assert.Equal(t, "pending_approval", res.Draft.Status)
+
+	c, _ = mockServer(t, 403, `{"statusCode":403,"name":"approval_required","message":"A person must approve this draft"}`)
+	_, err = c.Inboxes.Drafts.Send("i1", "d1")
+	var mse *MillionSendError
+	require.ErrorAs(t, err, &mse)
+	assert.Equal(t, "approval_required", mse.Name)
+}
+
+func TestInboxFieldsOnExistingResources(t *testing.T) {
+	c, rec := mockServer(t, 200, `{"object":"domain","id":"d1","receiving_catch_all":true}`)
+	d, err := c.Domains.Update("d1", &UpdateDomainRequest{ReceivingCatchAll: Ptr(true)})
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"receiving_catch_all":true}`, string(rec.Body))
+	assert.True(t, d.ReceivingCatchAll)
+
+	c, rec = mockServer(t, 200, `{"id":"k1","token":"ms_x"}`)
+	_, err = c.ApiKeys.Create(&CreateApiKeyRequest{Name: "agent", Permission: "full_access", InboxId: "i1"})
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"name":"agent","permission":"full_access","inbox_id":"i1"}`, string(rec.Body))
+
+	c, _ = mockServer(t, 200, `{"object":"list","has_more":false,"data":[{"id":"k1","name":"agent","created_at":"2026-10-12T10:00:00.000Z",
+		"last_used_at":null,"inbox_id":"i1"},{"id":"k2","name":"ci","created_at":"2026-10-12T10:00:00.000Z","last_used_at":null,"inbox_id":null}]}`)
+	keys, err := c.ApiKeys.List(nil)
+	require.NoError(t, err)
+	assert.Equal(t, "i1", *keys.Data[0].InboxId)
+	assert.Nil(t, keys.Data[1].InboxId)
+
+	c, rec = mockServer(t, 200, `{"object":"webhook","id":"w1","signing_secret":"whsec_x"}`)
+	_, err = c.Webhooks.Create(&CreateWebhookRequest{Endpoint: "https://x.dev/h", Events: []string{"email.received", "inbox.email.received"}, InboxIds: []string{"i1"}})
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"endpoint":"https://x.dev/h","events":["email.received","inbox.email.received"],"inbox_ids":["i1"]}`, string(rec.Body))
+
+	upd := &UpdateWebhookRequest{Status: "enabled"}
+	upd.ClearInboxIds()
+	_, err = c.Webhooks.Update("w1", upd)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"status":"enabled","inbox_ids":null}`, string(rec.Body))
+	_, err = c.Webhooks.Update("w1", &UpdateWebhookRequest{InboxIds: []string{"i1", "i2"}})
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"inbox_ids":["i1","i2"]}`, string(rec.Body))
+
+	c, _ = mockServer(t, 200, `{"object":"webhook","id":"w1","endpoint":"https://x.dev/h","events":["inbox.email.received"],
+		"status":"enabled","created_at":"2026-10-12T10:00:00.000Z","inbox_ids":["i1"]}`)
+	w, err := c.Webhooks.Get("w1")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"i1"}, w.InboxIds)
+
+	c, _ = mockServer(t, 200, `{"object":"usage","cloud":true,"plan":"starter","limits":{"emails_per_day":null,"domains":null,"inboxes":25},
+		"today":{"emails_sent":0,"resets_at":"2026-10-13T00:00:00Z"},"team":{"id":"tm1","name":"Acme"},"app_url":null}`)
+	u, err := c.Usage.Get()
+	require.NoError(t, err)
+	assert.Equal(t, 25, *u.Limits.Inboxes)
 }
