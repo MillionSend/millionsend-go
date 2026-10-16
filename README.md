@@ -34,7 +34,7 @@ func main() {
 
 	sent, err := client.Emails.Send(&millionsend.SendEmailRequest{
 		From:    "Acme <onboarding@acme.dev>",
-		To:      []string{"delivered@resend.dev"},
+		To:      []string{"success@simulator.amazonses.com"},
 		Subject: "Hello from MillionSend",
 		Html:    "<strong>It works!</strong>",
 	})

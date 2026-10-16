@@ -9,7 +9,7 @@
 //	client.BaseURL = "https://mail.acme.dev" // self-hosted only
 //	res, err := client.Emails.Send(&millionsend.SendEmailRequest{
 //		From:    "Acme <onboarding@acme.dev>",
-//		To:      []string{"delivered@resend.dev"},
+//		To:      []string{"success@simulator.amazonses.com"},
 //		Subject: "Hello",
 //		Html:    "<strong>it works</strong>",
 //	})
