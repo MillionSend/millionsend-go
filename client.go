@@ -15,7 +15,8 @@
 //	})
 //
 // Every method returns (*T, error); on a non-2xx response the error is a
-// *MillionSendError carrying the API's { statusCode, name, message }.
+// *MillionSendError carrying the API's { statusCode, name, message } and the
+// retry-after header, when there is one, as RetryAfter.
 package millionsend
 
 import (
@@ -239,7 +240,11 @@ func buildConfig(opts []RequestOption) requestConfig {
 }
 
 // ListOptions holds the keyset pagination params shared by every list endpoint.
-// After and Before are mutually exclusive; a zero Limit uses the API default.
+// Lists are newest first unless their method says otherwise: After takes the
+// last id of a page and pages toward older items, Before takes the first id
+// and pages toward newer ones (each page still newest first), and HasMore
+// refers to that direction. After and Before are mutually exclusive; a zero
+// Limit uses the API default.
 type ListOptions struct {
 	Limit  int
 	After  string
@@ -300,10 +305,14 @@ type ListResponse[T any] struct {
 }
 
 // BatchError is one failed item of a permissive-mode batch (Batch.Send,
-// Contacts.Batch.Create), by position in the request array.
+// Contacts.Batch.Create), by position in the request array. On
+// Contacts.Batch.Create, StatusCode and Name are what strict mode would answer
+// for the item; Batch.Send leaves them 0 and "".
 type BatchError struct {
-	Index   int    `json:"index"`
-	Message string `json:"message"`
+	Index      int    `json:"index"`
+	StatusCode int    `json:"statusCode"`
+	Name       string `json:"name"`
+	Message    string `json:"message"`
 }
 
 // Ptr returns a pointer to v — handy for the optional *string / *bool fields on
@@ -409,7 +418,11 @@ func (c *Client) do(ctx context.Context, p requestParams, out any) error {
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return parseError(data, resp.StatusCode)
+		e := parseError(data, resp.StatusCode)
+		if s, err := strconv.Atoi(resp.Header.Get("Retry-After")); err == nil && s >= 0 {
+			e.RetryAfter = &s
+		}
+		return e
 	}
 	if p.status != nil {
 		*p.status = resp.StatusCode

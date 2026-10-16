@@ -22,8 +22,14 @@ type capturedRequest struct {
 }
 
 // mockServer spins up an httptest server that records the last request and
-// replies with status/respBody, and returns a Client pointed at it.
+// replies with status/respBody as JSON, and returns a Client pointed at it.
 func mockServer(t *testing.T, status int, respBody string) (*Client, *capturedRequest) {
+	t.Helper()
+	return mockServerWithHeader(t, status, respBody, http.Header{"Content-Type": {"application/json"}})
+}
+
+// mockServerWithHeader is mockServer replying with the given headers.
+func mockServerWithHeader(t *testing.T, status int, respBody string, header http.Header) (*Client, *capturedRequest) {
 	t.Helper()
 	captured := &capturedRequest{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -34,7 +40,9 @@ func mockServer(t *testing.T, status int, respBody string) (*Client, *capturedRe
 		captured.RawQuery = r.URL.RawQuery
 		captured.Header = r.Header.Clone()
 		captured.Body = body
-		w.Header().Set("Content-Type", "application/json")
+		for k, v := range header {
+			w.Header()[k] = v
+		}
 		w.WriteHeader(status)
 		_, _ = io.WriteString(w, respBody)
 	}))
@@ -199,6 +207,39 @@ func TestAllRecipientsSuppressedErrorName(t *testing.T) {
 	assert.Equal(t, "All recipients are suppressed", mse.Message)
 }
 
+func TestErrorRetryAfter(t *testing.T) {
+	body := `{"statusCode":503,"name":"name_review_unavailable","message":"Names can't be reviewed right now"}`
+	c, _ := mockServerWithHeader(t, 503, body, http.Header{"Content-Type": {"application/json"}, "Retry-After": {"300"}})
+	_, err := c.Inboxes.Create(&CreateInboxRequest{Username: "signup-bot"})
+	var mse *MillionSendError
+	require.ErrorAs(t, err, &mse)
+	assert.Equal(t, 503, mse.StatusCode)
+	assert.Equal(t, "name_review_unavailable", mse.Name)
+	require.NotNil(t, mse.RetryAfter)
+	assert.Equal(t, 300, *mse.RetryAfter)
+
+	c, _ = mockServer(t, 503, body)
+	_, err = c.Inboxes.Create(&CreateInboxRequest{Username: "signup-bot"})
+	require.ErrorAs(t, err, &mse)
+	assert.Nil(t, mse.RetryAfter)
+}
+
+func TestUnknownRouteNotFound(t *testing.T) {
+	c, _ := mockServer(t, 404, `{"statusCode":404,"name":"not_found","message":"The requested endpoint does not exist."}`)
+	_, err := c.Emails.Get("e1")
+	var mse *MillionSendError
+	require.ErrorAs(t, err, &mse)
+	assert.Equal(t, 404, mse.StatusCode)
+	assert.Equal(t, "not_found", mse.Name)
+
+	// Servers before v0.13.0 answer an unknown route in plain text.
+	c, _ = mockServerWithHeader(t, 404, "404 Not Found", http.Header{"Content-Type": {"text/plain"}})
+	_, err = c.Emails.Get("e1")
+	require.ErrorAs(t, err, &mse)
+	assert.Equal(t, 404, mse.StatusCode)
+	assert.Equal(t, "application_error", mse.Name)
+}
+
 func TestErrorFallbackForNonCanonicalBody(t *testing.T) {
 	c, _ := mockServer(t, 500, `gateway boom`)
 	_, err := c.Emails.Get("e1")
@@ -217,6 +258,7 @@ func TestTransportErrorHasNullStatus(t *testing.T) {
 	var mse *MillionSendError
 	require.ErrorAs(t, err, &mse)
 	assert.Equal(t, 0, mse.StatusCode, "transport failures use statusCode null (0)")
+	assert.Nil(t, mse.RetryAfter)
 }
 
 func TestNeverSendsAPathADotIdRedirects(t *testing.T) {

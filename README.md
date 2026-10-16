@@ -96,15 +96,45 @@ if err != nil {
 ```
 
 `StatusCode` is `0` when the request never reached the API (a transport or
-client-side failure) — the wire's `statusCode: null`.
+client-side failure) — the wire's `statusCode: null`. `RetryAfter` is the
+response's `retry-after` header in seconds (`*int`, nil when it has none).
+`Message` is for people: switch on `Name`, don't parse the message.
 
 Receiving and inboxes add the names `inbox_send_policy`, `inbox_send_cap_reached`,
-`approval_required`, `email_quarantined`, `email_blocked`, `too_many_waits` and
-`plan_limit_reached`.
+`approval_required`, `email_quarantined`, `email_blocked`, `too_many_waits`,
+`plan_limit_reached` and `name_review_unavailable` (503, see
+[the shared domain](#the-shared-domain)). Changes to the shared domain's row
+in `Domains` answer `403 forbidden`.
+
+An unknown route answers `404 not_found`. Servers before v0.13.0 answer it in
+plain text, which surfaces as `application_error` with `StatusCode` 404.
 
 `Emails.Send` and `Batch.Send` answer `422 all_recipients_suppressed` when every
 `To` recipient is on the suppression list or opted out of the send's `TopicId`;
 nothing is sent.
+
+### Retries
+
+The SDK never retries on its own. Worth retrying after `RetryAfter` seconds:
+`503 name_review_unavailable`, `429 too_many_waits`, and `429
+rate_limit_exceeded` when `RetryAfter` is at most 60 (the per-minute limits).
+Not worth retrying in the same process: `429 inbox_send_cap_reached` and the
+daily name-review `429` (also `rate_limit_exceeded`, so check `RetryAfter`,
+not just the name), which both last until the next UTC midnight, and any 403,
+404, 409 or 422.
+
+```go
+var apiErr *millionsend.MillionSendError
+if errors.As(err, &apiErr) && apiErr.RetryAfter != nil &&
+	(apiErr.Name == "name_review_unavailable" || apiErr.Name == "too_many_waits" ||
+		apiErr.Name == "rate_limit_exceeded" && *apiErr.RetryAfter <= 60) {
+	time.Sleep(time.Duration(*apiErr.RetryAfter) * time.Second) // then try again
+}
+```
+
+Retry sends, replies, forwards and `Inboxes.Drafts.Send` with the same
+`WithIdempotencyKey`. A `Draft` outcome (HTTP 202) is a message held for
+approval, not a failure: never send it again.
 
 ## Request options
 
@@ -138,7 +168,9 @@ client.Batch.SendWithOptions(ctx, reqs, &millionsend.BatchSendEmailOptions{
 
 Batch validation is `strict` by default (any invalid item rejects the whole
 batch). `permissive` sends the valid items and lists the rest in the
-response's `Errors []BatchError{Index, Message}`.
+response's `Errors []BatchError{Index, StatusCode, Name, Message}`;
+`StatusCode` and `Name`, what strict mode would answer for the item, come
+from `Contacts.Batch.Create` only.
 
 ## Clearing a value with `null`
 
@@ -159,6 +191,41 @@ Available: `UpdateContactRequest.ClearFirstName/ClearLastName`,
 `InboxSafetyUpdate.ClearSendCap`, `UpdateInboxDraftRequest.ClearTo/ClearCc/ClearBcc/ClearSubject/ClearBody`. A `nil` value inside
 `UpdateContactRequest.Properties` removes that key, and a nil
 `UpdateContactPropertyRequest.FallbackValue` clears the fallback.
+
+## Pagination
+
+Lists take `Limit` and at most one of `After` or `Before` (an item id), and
+return `{Object, Data, HasMore}`. They are newest first, except threads (most
+recently active first), a thread's emails (oldest first), drafts (most
+recently updated first), a received email's attachments (in message order),
+and labels and topics, which are not paginated. `After` takes the last id of
+a page and moves toward older items; `Before` takes the first id and moves
+toward newer ones, still newest first within the page. `HasMore` refers to
+the direction you're moving in.
+
+To fetch what arrived since your last sync, start `Before` at the newest id
+you have:
+
+```go
+before := newestStoredID
+for {
+	page, err := client.Emails.List(&millionsend.ListOptions{Before: before, Limit: 100})
+	if err != nil {
+		return err
+	}
+	// store page.Data
+	if !page.HasMore || len(page.Data) == 0 {
+		break
+	}
+	before = page.Data[0].Id
+}
+```
+
+A cursor whose item was deleted answers `422 validation_error` on the
+top-level lists and `Emails.Receiving.List`, and `404 not_found` on the inbox
+lists: start again without a cursor and stop at the ids you already have.
+Servers before v0.13.0 list oldest first; walking every page with `After`
+returns every item on both.
 
 ## Resources
 
@@ -188,6 +255,23 @@ client.Batch.Send([]*millionsend.SendEmailRequest{a, b}, millionsend.WithIdempot
 `Attachment.Content` is raw bytes; it is base64-encoded on the wire. `Template`
 is passed through unchanged: the API does not support stored-template sends
 yet and answers `422` (send `Html`/`Text` instead).
+
+`Subject` takes up to 998 characters. A `To`, `Cc` or `Bcc` address whose
+domain can never receive mail (`example.com`, a reserved TLD such as `.test`
+or `.invalid`, or a TLD that doesn't exist) gets `422 validation_error`; to
+try sending without emailing anyone, send to `success@simulator.amazonses.com`.
+
+`From` can be an inbox's address on [the shared domain](#the-shared-domain)
+while its `SendingMode` is `open`: exactly the inbox's `EmailAddress`, with
+no +tag, no display name or the inbox's `FromName`, at most 10 distinct
+recipients across `To`, `Cc` and `Bcc`, and no `ReplyTo`, `Attachments`,
+`Headers` or `ScheduledAt`. A key restricted to one of your domains gets
+`403 restricted_api_key` for such a send.
+
+`Batch.Send` items never send from the shared domain: such an item gets `403
+inbox_send_policy`, which in strict mode fails the whole batch. A retry with
+the same `WithIdempotencyKey` gets the stored response, even if a recipient
+was refused or suppressed since.
 
 ### Receiving
 
@@ -225,8 +309,10 @@ client.Emails.Receiving.Forward(id, &millionsend.ForwardReceivedEmailRequest{
 ```
 
 `ListReceivedEmailsOptions` also takes `Before`/`After`, `Since`, `To`,
-`SubjectContains`, `Unread` (with `InboxId`), and `IncludeQuarantined` or `Quarantined`
-(full-access keys). `From` is an address, or a domain covering its subdomains.
+`SubjectContains`, `Unread` (with `InboxId`, except on an inbox-scoped key), and
+`IncludeQuarantined` or `Quarantined` (full-access keys). `From` is an address,
+or a domain covering its subdomains. An `InboxId` the key can't reach answers
+`404 not_found` at once, even with `Wait`.
 Replies and forwards return a `*SendOutcome[T]`: `Sent` once the email went
 out, or `Draft` when an inbox's rules hold it for approval.
 
@@ -238,8 +324,13 @@ default: screening, code extraction and send rules on) or for people
 `Quarantine` are MillionSend extensions.
 
 ```go
-inbox, _ := client.Inboxes.Create(&millionsend.CreateInboxRequest{Name: "Signup bot", ExpiresIn: "24h"}) // a random address on the shared domain
+inbox, _ := client.Inboxes.Create(&millionsend.CreateInboxRequest{
+	Name:      "Signup bot", // 1-320 characters
+	Username:  "signup-bot", // signup-bot@<team>.<shared domain>; without it, a random name
+	ExpiresIn: "24h",        // "1h" to "365d"; empty, it never expires
+})
 inbox, _ = client.Inboxes.Create(&millionsend.CreateInboxRequest{EmailAddress: "support@acme.dev", Kind: "human"})
+client.Inboxes.Create(&millionsend.CreateInboxRequest{DomainId: domainID, Username: "billing"}) // billing@<your domain>, by its Domains.List id
 client.Inboxes.List(&millionsend.ListInboxesOptions{Kind: "agent"})
 client.Inboxes.Get("support@acme.dev") // by id or address
 upd := &millionsend.UpdateInboxRequest{Name: "Support", FromName: millionsend.Ptr("Acme Support")}
@@ -256,6 +347,8 @@ client.Inboxes.Safety.Update(inbox.Id, &millionsend.InboxSafetyUpdate{
 // Verification codes and sign-in links (never fetched); waits up to 50 s
 code, _ := client.Inboxes.Codes.Latest(inbox.Id, &millionsend.LatestCodeOptions{From: "github.com", Wait: 30})
 // code.Status: "found" | "none" | "ambiguous" | "timeout"; code.Code ("482913") or code.Url
+// A second sign-in: only mail received after the code already used counts
+next, _ := client.Inboxes.Codes.Latest(inbox.Id, &millionsend.LatestCodeOptions{Wait: 30, Since: code.ReceivedAt})
 
 // Quarantine: held mail is kept and listed; agents see it only once a person releases it
 client.Inboxes.Quarantine.List(inbox.Id, nil)
@@ -263,6 +356,7 @@ client.Inboxes.Quarantine.Release(inbox.Id, emailID, &millionsend.ReleaseQuarant
 
 // Threads and their messages
 client.Inboxes.Threads.List(inbox.Id, &millionsend.ListInboxThreadsOptions{Folders: []string{"inbox", "archive"}, Read: millionsend.Ptr(false)})
+client.Inboxes.Threads.List(inbox.Id, &millionsend.ListInboxThreadsOptions{IncludeQuarantined: true}) // full-access team keys: Data[i].Quarantined
 client.Inboxes.Threads.Search(inbox.Id, &millionsend.SearchInboxThreadsOptions{Query: "invoice", From: []string{"stripe.com"}})
 client.Inboxes.Threads.Get(inbox.Id, threadID)
 client.Inboxes.Threads.Update(inbox.Id, threadID, &millionsend.UpdateInboxThreadRequest{Folder: "archive", LabelId: labelID})
@@ -297,6 +391,61 @@ draft that waits for approval (`approval_required`); a person in the dashboard
 or a full-access team key can. Slices in list and search options (`Folders`,
 `Labels`, `From`, …) go out as one comma-separated value. Resend's hosted agent
 settings (`/inboxes/:id/agent`) are not exposed: MillionSend runs no agent.
+
+`Inboxes.Create` takes no Idempotency-Key. After a 503 or 429 nothing was
+created, so sending it again is safe; after a timeout a retry may create a
+second inbox, and with a chosen `Username` a 409 on the retry usually means
+the first attempt worked (`Inboxes.Get(address)` finds it). Older servers
+ignore fields they don't know: `Username` before v0.12.0 and `DomainId`
+before v0.14.0, so check the created inbox's `EmailAddress`; `Since` before
+v0.13.0, so the code you already used can come back.
+
+#### The shared domain
+
+Without `EmailAddress`, an inbox gets an address on the instance's shared
+inbox domain, which needs no DNS: `<username>@<team>.<shared domain>`. That
+subdomain is the `Shared` row of [`Domains.List`](#domains), whose `Id` is the
+inbox's `DomainId`; passing it as `DomainId` works like leaving `EmailAddress`
+out. With the id of one of your own domains instead, `Username` is required
+and the address is `<username>@<domain>` (the domain needs receiving on, or
+`Forwarding: true`).
+
+- **`Username`** is trimmed and lowercased: 1-64 of `a-z 0-9 . _ -`, starting
+  and ending with a letter or digit, no `..`. Reserved names (`postmaster`,
+  `abuse`, `admin`, …), a `fwd-` prefix and brand look-alikes get 422, and a
+  name in use 409. `Username` or `DomainId` together with `EmailAddress` is a
+  422.
+- **Name review.** A chosen `Username` or `FromName` (on create and update) is
+  reviewed first. While the review is unavailable, the answer is `503
+  name_review_unavailable` with `RetryAfter` 60 (leaving `Username` out still
+  gives a random address). While a new team's subdomain waits for its own
+  review, every shared-domain or `Forwarding` inbox create gets that 503 with
+  `RetryAfter` 300. Past the daily review budget, the answer is `429
+  rate_limit_exceeded` until the next UTC midnight.
+- **Lifetime.** Inboxes never expire unless `ExpiresIn` says so. A
+  shared-domain inbox unused for 90 days (no mail in or out, no API call on
+  it) is deleted, firing `inbox.expired` and then `inbox.deleted`.
+- **Sending** follows the row's `SendingMode`: `open` starts conversations
+  (with [`Emails.Send`](#emails) too), `reply_only` only replies inside a
+  thread to its own correspondents, and `receive_only` sends nothing. An inbox
+  whose name looks like a brand only replies, even under `open`. Batch and
+  broadcast sends never use the shared domain.
+- **Safety.** A `SendPolicy` of `open` is accepted only while the mode is
+  `open`, and `allowlist` never; `OwnerAddresses` don't make senders trusted;
+  `ForwardTo` copies go only to team members' sign-in addresses.
+
+The refusals are the same for `Emails.Send`, replies, forwards and
+`Drafts.Send`:
+
+| Status | Name | When |
+|---|---|---|
+| 403 | `inbox_send_policy` | `SendingMode` is `receive_only`, or `reply_only` outside a thread (`SendingModeReason` says whether the plan or the instance holds it); an inbox name that looks like a brand; any batch or broadcast send |
+| 429 | `inbox_send_cap_reached` | the team's daily cap for mail from the shared domain; `RetryAfter` runs to the next UTC midnight |
+| 422 | `validation_error` | more than 10 distinct recipients (`Drafts.Create` too); on `Emails.Send`, a `From` or field the shared domain doesn't take |
+
+A person or a team key sending a draft skips the inbox's own rules, never the
+shared domain's. An agent's reply to a `Reply-To` at another organization is
+held: a `Draft` outcome whose `ApprovalReasons` include `reply_to_redirect`.
 
 ### Contacts
 
@@ -365,7 +514,7 @@ res, err := client.Contacts.Batch.Create([]*millionsend.CreateContactRequest{
 	millionsend.WithBatchValidation(millionsend.BatchValidationPermissive))
 // res.Data[i]  → {Index, Id, Status: "created" | "updated" | "skipped"}
 // res.Counts   → {Created, Updated, Skipped, Failed}
-// res.Errors   → permissive mode only: failed items by index
+// res.Errors   → permissive mode only: {Index, StatusCode, Name, Message} per failed item
 ```
 
 `POST /contacts/batch/get` reads up to 1000 contacts by id or email in one
@@ -419,7 +568,9 @@ client.Topics.Remove(id)
 
 Targeting is an optional `SegmentId` and/or `TopicId`; set neither to send to
 all the team's contacts. `Send: true` sends (or, with `ScheduledAt`, schedules)
-on create instead of saving a draft.
+on create instead of saving a draft. `Subject` takes up to 998 characters.
+Broadcasts never send from [the shared domain](#the-shared-domain): `Create`
+with `Send: true` and `Send` answer `403 inbox_send_policy`.
 
 ```go
 b, _ := client.Broadcasts.Create(&millionsend.CreateBroadcastRequest{
@@ -469,6 +620,31 @@ client.Domains.Remove(d.Id)
 `UpdateDomainRequest.Tls` is passed through unchanged: the API does not expose
 a TLS policy and answers `422` rather than dropping it.
 
+On an instance with a shared inbox domain, `List` ends with your team's
+subdomain of it (`<team>.<shared domain>`, see
+[the shared domain](#the-shared-domain)), after every page of your own
+domains, so it can come alone on a last page. Every row carries `Shared`:
+`true` there, `false` on your own domains and on every row from a server
+before v0.14.0. Only the shared row has `SendingMode` (`open`, `reply_only` or
+`receive_only`: what its inboxes may send) and `SendingModeReason` (`plan` or
+`instance`, what holds it below `open`; `""` when `open`). Its
+`Capabilities.Sending` is `disabled` under `receive_only`, and `Get` returns
+it with no `Records`. It is read-only: `Update`, `Verify` and `Remove` answer
+`403 forbidden`. A new team's row shows up once its subdomain passes its name
+review.
+
+The shared row sends only from an inbox's own address, so leave it out when
+picking a sender domain:
+
+```go
+page, _ := client.Domains.List(nil)
+for _, d := range page.Data {
+	if d.Status == "verified" && !d.Shared {
+		// a domain you can send from
+	}
+}
+```
+
 ### Webhooks
 
 Events: `email.sent`, `email.delivered`, `email.delivery_delayed`,
@@ -484,7 +660,9 @@ inbox events `inbox.created`, `inbox.updated`, `inbox.deleted`,
 `inbox.email.quarantined`, `inbox.draft.created`, `inbox.draft.updated`,
 `inbox.draft.sent`, `inbox.draft.deleted`. Inbox events are opt-in: an
 endpoint gets them only when its `Events` name them, and `InboxIds` limits
-them (and `email.received`) to those inboxes.
+them (and `email.received`) to those inboxes. Their `data.source` says who
+acted: `api`, `dashboard` or `system`. A shared-domain inbox deleted after 90
+unused days fires `inbox.expired`, then `inbox.deleted`.
 
 ```go
 w, _ := client.Webhooks.Create(&millionsend.CreateWebhookRequest{
@@ -511,7 +689,7 @@ secret.
 
 ```go
 k, _ := client.ApiKeys.Create(&millionsend.CreateApiKeyRequest{
-	Name: "ci", Permission: "sending_access", DomainId: domainID,
+	Name: "ci", Permission: "sending_access", DomainId: domainID, // one of your domains: a Shared false row
 }) // k.Token is returned only here
 client.ApiKeys.Create(&millionsend.CreateApiKeyRequest{
 	Name: "signup-bot", Permission: "full_access", InboxId: inboxID,
@@ -594,6 +772,19 @@ The effective plan, its limits and today's accepted send count. `Plan` and the
 u, _ := client.Usage.Get()
 fmt.Println(u.Today.EmailsSent, "sent today; resets", u.Today.ResetsAt)
 ```
+
+## Server versions
+
+On a self-hosted instance, each feature needs at least this MillionSend version:
+
+| Server | Features |
+|---|---|
+| v0.8.0 | `Emails.Receiving` |
+| v0.10.0 | `Inboxes` |
+| v0.11.0 | `422` for recipients that can never receive mail; a retried batch gets its stored response |
+| v0.12.0 | `Username`; inboxes that never expire by default; sends from shared-domain inboxes; `name_review_unavailable` and the daily name-review budget; `StatusCode`/`Name` on contacts-batch errors |
+| v0.13.0 | Newest-first lists; `Since` on `Codes.Latest`; `Quarantined` on thread items; inbox names up to 320 characters; `404` at once for an unknown `InboxId`; `Unread` on inbox-scoped keys; JSON `404` for unknown routes |
+| v0.14.0 | The shared row in `Domains.List` (`Shared`, `SendingMode`, `SendingModeReason`); `DomainId` on `Inboxes.Create`; `Subject` up to 998 characters |
 
 ## Migrating from Resend
 

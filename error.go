@@ -13,9 +13,14 @@ type MillionSendError struct {
 	// StatusCode is the HTTP status. It is 0 when the request never reached the
 	// API (a transport or client-side failure) — the wire's "statusCode: null".
 	StatusCode int `json:"statusCode"`
-	// Name is the stable discriminant you can switch on.
+	// Name is the stable discriminant you can switch on. Message is for
+	// people: don't parse it.
 	Name    string `json:"name"`
 	Message string `json:"message"`
+	// RetryAfter is the response's retry-after header in seconds, nil when it
+	// has none. A 429 rate_limit_exceeded can last until the next UTC
+	// midnight, so read it before retrying rather than the name alone.
+	RetryAfter *int `json:"-"`
 }
 
 func (e *MillionSendError) Error() string {

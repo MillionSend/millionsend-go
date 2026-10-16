@@ -17,7 +17,7 @@ type Inbox struct {
 	// EmailAddress is lowercase and fixed at creation.
 	EmailAddress string `json:"email_address"`
 	// DomainId is the custom domain, or the team's subdomain of the shared
-	// inbox domain (which /domains does not list).
+	// inbox domain: the Domains.List row with Shared true.
 	DomainId         string `json:"domain_id"`
 	ReceivingAddress string `json:"receiving_address"` // set for forwarding inboxes
 	FromName         string `json:"from_name"`
@@ -34,13 +34,23 @@ type Inbox struct {
 }
 
 // CreateInboxRequest is the payload for Inboxes.Create; every field is
-// optional. Without EmailAddress the inbox gets a random address on the shared
-// inbox domain. Kind is "agent" (the default: screening, code extraction and
-// send rules on) or "human". ExpiresIn is like "1h", "24h" or "30d"; empty
-// keeps the server default (never on a custom domain, 24h on the shared one).
-// Safety sets any of the rules at creation.
+// optional. Without EmailAddress the inbox gets an address on the shared inbox
+// domain, Username@<team>.<shared domain>, random without a Username. There
+// Username is trimmed and lowercased: 1-64 of a-z 0-9 . _ -, starting and
+// ending with a letter or digit, without ".."; reserved names (postmaster,
+// abuse, admin, …), a "fwd-" prefix and brand look-alikes get 422, and one in
+// use 409. DomainId, instead of EmailAddress, is the id of a Domains.List
+// row: the shared row works like leaving EmailAddress out, and one of the
+// team's own domains needs Username, the part before the @ under
+// EmailAddress's rules, giving Username@<domain> (receiving on, or
+// Forwarding). Name takes 1-320 characters. Kind is "agent" (the default:
+// screening, code extraction and send rules on) or "human". ExpiresIn runs
+// from "1h" to "365d"; empty, the inbox never expires. Safety sets any of the
+// rules at creation.
 type CreateInboxRequest struct {
 	EmailAddress string             `json:"email_address,omitempty"`
+	DomainId     string             `json:"domain_id,omitempty"`
+	Username     string             `json:"username,omitempty"`
 	Name         string             `json:"name,omitempty"`
 	FromName     string             `json:"from_name,omitempty"`
 	Forwarding   bool               `json:"forwarding,omitempty"`
@@ -50,8 +60,8 @@ type CreateInboxRequest struct {
 }
 
 // UpdateInboxRequest is the payload for Inboxes.Update; empty fields are left
-// unchanged. FromName: Ptr("") removes the display name. ClearExpiresIn makes
-// the inbox never expire.
+// unchanged. Name takes 1-320 characters. FromName: Ptr("") removes the
+// display name. ClearExpiresIn makes the inbox never expire.
 type UpdateInboxRequest struct {
 	Name      string  `json:"name,omitempty"`
 	FromName  *string `json:"from_name,omitempty"`
@@ -81,6 +91,10 @@ type ListInboxesOptions struct {
 }
 
 // InboxSafety is an inbox's rules: who may write in and what an agent may send.
+// On a shared inbox, SendPolicy "open" is accepted only while the shared row's
+// SendingMode is "open" and "allowlist" never, OwnerAddresses don't make
+// senders trusted, and ForwardTo copies go only to team members' sign-in
+// addresses.
 type InboxSafety struct {
 	Object          string   `json:"object"`
 	InboxId         string   `json:"inbox_id"`
@@ -143,12 +157,15 @@ type VerificationCode struct {
 
 // LatestCodeOptions filters Codes.Latest. From is an address, or a domain
 // covering its subdomains. Wait (up to 50 seconds) long-polls for a new
-// code. MaxAge (60-86400 seconds, server default 600) bounds how old the
-// email may be.
+// code. MaxAge (60-86400 seconds, server default 600) bounds how long ago the
+// email reached the inbox (a released one counts from its release). Since
+// counts only mail received after that instant: pass the ReceivedAt of the
+// code already used, so a second sign-in waits for its own.
 type LatestCodeOptions struct {
 	From   string
 	Wait   int
 	MaxAge int
+	Since  string // ISO 8601 with an offset, as time.RFC3339 writes it
 }
 
 // QuarantinedEmail is a held message in Quarantine.List.
@@ -220,7 +237,10 @@ type InboxThread struct {
 // InboxThreadListItem is a row of Threads.List and Threads.Search. From is
 // the latest inbound sender ("Name <address>"); To, Cc and Bcc are the latest
 // message's; ReceivedAt is the last activity. MatchedEmailId and Highlights
-// (matched fragments marked **like this**) come with Search only.
+// (matched fragments marked **like this**) come with Search only. Quarantined
+// counts the messages in quarantine not yet released (mail still being
+// screened isn't counted); the API sends it only with IncludeQuarantined,
+// so it is 0 otherwise.
 type InboxThreadListItem struct {
 	Id             string              `json:"id"`
 	Subject        string              `json:"subject"`
@@ -233,6 +253,7 @@ type InboxThreadListItem struct {
 	HasAttachment  bool                `json:"has_attachment"`
 	HasDraft       bool                `json:"has_draft"`
 	Read           bool                `json:"read"`
+	Quarantined    int                 `json:"quarantined"`
 	ReceivedAt     string              `json:"received_at"`
 	Folder         string              `json:"folder"`
 	MatchedEmailId string              `json:"matched_email_id"`
@@ -242,7 +263,8 @@ type InboxThreadListItem struct {
 // ListInboxThreadsOptions filters Threads.List (most recently active first).
 // Folders defaults to inbox (inbox, archive and sent when Labels is set);
 // Labels matches any of the label ids; IncludeQuarantined also counts held
-// mail (full-access keys).
+// mail and fills each item's Quarantined (full-access keys not scoped to an
+// inbox; an inbox-scoped key gets 403 restricted_api_key).
 type ListInboxThreadsOptions struct {
 	Folders            []string
 	Labels             []string
@@ -470,6 +492,18 @@ type InboxesService struct {
 }
 
 // Create adds an inbox. Pass nil for a random address on the shared domain.
+//
+// On the shared domain a chosen Username or FromName is reviewed first. While
+// that review is unavailable the answer is 503 name_review_unavailable with
+// RetryAfter 60 (leaving Username out still gives a random address); while a
+// new team's subdomain waits for its own review, every shared or forwarding
+// inbox gets that 503 with RetryAfter 300. Past the daily review budget it is
+// 429 rate_limit_exceeded until the next UTC midnight.
+//
+// Create takes no Idempotency-Key. After a 503 or 429 nothing was created,
+// so sending it again is safe; after a timeout a retry may create a second
+// inbox, and with a Username a 409 on the retry usually means the first one
+// worked (Get finds it by address).
 func (s *InboxesService) Create(params *CreateInboxRequest) (*Inbox, error) {
 	if params == nil {
 		params = &CreateInboxRequest{}
@@ -498,7 +532,8 @@ func (s *InboxesService) Get(idOrEmail string) (*Inbox, error) {
 	})
 }
 
-// Update renames an inbox or changes its display name or expiry.
+// Update renames an inbox or changes its display name or expiry. On the shared
+// domain a new FromName is reviewed as on Create (503 or 429).
 func (s *InboxesService) Update(id string, params *UpdateInboxRequest) (*Inbox, error) {
 	return doJSON[Inbox](s.client, context.Background(), requestParams{
 		method: http.MethodPatch, path: inboxPath(id), body: params,
@@ -550,6 +585,7 @@ func (s *InboxCodesService) LatestWithContext(ctx context.Context, inboxId strin
 		setQuery(query, "from", opts.From)
 		setQuery(query, "wait", opts.Wait)
 		setQuery(query, "max_age", opts.MaxAge)
+		setQuery(query, "since", opts.Since)
 		wait = time.Duration(opts.Wait) * time.Second
 	}
 	return doJSON[VerificationCode](s.client, ctx, requestParams{
@@ -689,7 +725,10 @@ func heldQuery(q url.Values, opts []RequestOption) url.Values {
 
 // Reply answers a message in its thread from the inbox address. Pass
 // WithIdempotencyKey to make it idempotent. The outcome's Draft is set
-// instead of Sent when the inbox's rules hold the reply for approval.
+// instead of Sent when the inbox's rules hold the reply for approval. From a
+// shared inbox the shared row's SendingMode applies (see Domain): a send it
+// forbids is 403 inbox_send_policy, the team's daily cap 429
+// inbox_send_cap_reached, and more than 10 recipients 422.
 func (s *InboxThreadEmailsService) Reply(inboxId, threadId, emailId string, params *ReplyInThreadRequest, opts ...RequestOption) (*SendOutcome[InboxThreadEmail], error) {
 	return doOutcome[InboxThreadEmail](s.client, context.Background(), requestParams{
 		method: http.MethodPost, path: threadPath(inboxId, threadId) + "/emails/" + url.PathEscape(emailId) + "/reply",
@@ -716,7 +755,8 @@ func (s *InboxDraftsService) List(inboxId string, opts *ListOptions) (*ListRespo
 	})
 }
 
-// Create saves a draft; nothing is sent until Send.
+// Create saves a draft; nothing is sent until Send. On a shared inbox a draft
+// takes at most 10 distinct recipients (422).
 func (s *InboxDraftsService) Create(inboxId string, params *CreateInboxDraftRequest) (*InboxDraft, error) {
 	return doJSON[InboxDraft](s.client, context.Background(), requestParams{
 		method: http.MethodPost, path: inboxPath(inboxId) + "/drafts", body: params,
@@ -747,7 +787,8 @@ func (s *InboxDraftsService) Remove(inboxId, draftId string) (*RemoveResponse, e
 // Send sends a draft. Pass WithIdempotencyKey to make it idempotent. The
 // outcome's Draft is set instead of Sent when the inbox's rules hold it for
 // approval; an inbox-scoped key gets 403 approval_required for a draft that
-// waits for a person.
+// waits for a person. A person or a team key skips the inbox's rules, never
+// the shared domain's (see InboxThreadEmailsService.Reply).
 func (s *InboxDraftsService) Send(inboxId, draftId string, opts ...RequestOption) (*SendOutcome[InboxDraftSent], error) {
 	return doOutcome[InboxDraftSent](s.client, context.Background(), requestParams{
 		method: http.MethodPost, path: draftPath(inboxId, draftId) + "/send",

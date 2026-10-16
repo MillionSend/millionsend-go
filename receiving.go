@@ -133,7 +133,9 @@ type HeldEmail struct {
 
 // ListReceivedEmailsOptions filters and paginates Receiving.List. Wait (up to
 // 50 seconds) long-polls for mail newer than Before or Since (default: a
-// minute before the call) and answers an empty page when nothing arrives.
+// minute before the call) and answers an empty page when nothing arrives. An
+// InboxId the key can't reach answers 404 not_found at once, even with Wait;
+// an inbox-scoped key naming another inbox gets 403 restricted_api_key.
 type ListReceivedEmailsOptions struct {
 	Limit           int
 	After           string
@@ -144,7 +146,7 @@ type ListReceivedEmailsOptions struct {
 	To              string // an address the message was delivered to
 	From            string // an address, or a domain covering its subdomains
 	SubjectContains string
-	Unread          *bool // needs InboxId
+	Unread          *bool // needs InboxId, except with an inbox-scoped key
 	// IncludeQuarantined also lists held mail, Quarantined lists only held
 	// mail; full-access keys not scoped to an inbox.
 	IncludeQuarantined bool
@@ -267,7 +269,8 @@ func (s *ReceivingService) GetWithOptions(ctx context.Context, id string, params
 
 // Reply answers a received email in its thread. Pass WithIdempotencyKey to
 // make it idempotent. The outcome's Draft is set instead of Sent when an
-// inbox's rules hold the reply for a person to approve.
+// inbox's rules hold the reply for a person to approve. From a shared inbox
+// the shared domain's refusals apply (see InboxThreadEmailsService.Reply).
 func (s *ReceivingService) Reply(id string, params *ReplyReceivedEmailRequest, opts ...RequestOption) (*SendOutcome[ReceivedEmailSent], error) {
 	return doOutcome[ReceivedEmailSent](s.client, context.Background(), requestParams{
 		method: http.MethodPost, path: receivedPath(id) + "/reply", body: params,

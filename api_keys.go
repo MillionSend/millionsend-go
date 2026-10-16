@@ -8,8 +8,9 @@ import (
 
 // CreateApiKeyRequest is the payload for ApiKeys.Create. Permission is
 // "full_access" (default) or "sending_access"; DomainId restricts a
-// sending_access key to one domain. InboxId makes a full_access key that
-// reads and sends for that one inbox (at most 5 per inbox).
+// sending_access key to one of the team's own domains (a Domains.List row with
+// Shared false; the shared row answers 422). InboxId makes a full_access key
+// that reads and sends for that one inbox (at most 5 per inbox).
 type CreateApiKeyRequest struct {
 	Name       string `json:"name"`
 	Permission string `json:"permission,omitempty"`

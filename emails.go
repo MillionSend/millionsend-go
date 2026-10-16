@@ -33,7 +33,10 @@ type EmailTemplate struct {
 
 // SendEmailRequest is the payload for Emails.Send and each element of a batch.
 // Fields map to the snake_case wire via their json tags; empty optionals are
-// omitted.
+// omitted. Subject takes up to 998 characters. A To, Cc or Bcc address whose
+// domain can never receive mail (example.com, a reserved TLD such as .test or
+// .invalid, or a TLD that doesn't exist) gets 422 validation_error; to try
+// sending without emailing anyone, use success@simulator.amazonses.com.
 type SendEmailRequest struct {
 	From        string            `json:"from"`
 	To          []string          `json:"to"`
@@ -158,6 +161,14 @@ type EmailsService struct {
 }
 
 // Send posts a single email. Pass WithIdempotencyKey to make the send idempotent.
+//
+// From can be an inbox's address on the shared domain while the shared row's
+// SendingMode is "open" (see Domain): exactly the inbox's EmailAddress, with
+// no +tag, no display name or the inbox's FromName, at most 10 distinct
+// recipients across To, Cc and Bcc, and no ReplyTo, Attachments, Headers or
+// ScheduledAt. Otherwise the shared domain answers 403 inbox_send_policy,
+// 429 inbox_send_cap_reached (the team's daily cap) or 422 validation_error,
+// and a key restricted to one of the team's domains 403 restricted_api_key.
 func (s *EmailsService) Send(params *SendEmailRequest, opts ...RequestOption) (*SendEmailResponse, error) {
 	return s.SendWithContext(context.Background(), params, opts...)
 }
@@ -270,7 +281,10 @@ type BatchService struct{ client *Client }
 
 // Send posts 1–100 emails in one call. Pass WithIdempotencyKey to make it
 // idempotent and WithBatchValidation(BatchValidationPermissive) to send the
-// valid subset when some items are invalid.
+// valid subset when some items are invalid. Items never send from the shared
+// domain: such an item is a 403 inbox_send_policy, which fails the whole
+// batch in strict mode. A retry with the key of a batch already accepted gets
+// the stored response, even if a recipient was refused or suppressed since.
 func (s *BatchService) Send(params []*SendEmailRequest, opts ...RequestOption) (*BatchSendResponse, error) {
 	return s.SendWithContext(context.Background(), params, opts...)
 }

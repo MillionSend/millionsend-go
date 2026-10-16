@@ -89,8 +89,7 @@ func TestBatchValidationHeaderAndErrors(t *testing.T) {
 	assert.Equal(t, "b-1", rec.Header.Get("Idempotency-Key"))
 	require.Len(t, res.Data, 1)
 	require.Len(t, res.Errors, 1)
-	assert.Equal(t, 1, res.Errors[0].Index)
-	assert.Equal(t, "emails.1: invalid to", res.Errors[0].Message)
+	assert.Equal(t, BatchError{Index: 1, Message: "emails.1: invalid to"}, res.Errors[0])
 
 	// Functional-option form.
 	_, err = c.Batch.Send([]*SendEmailRequest{sampleEmail()}, WithBatchValidation(BatchValidationStrict))
@@ -181,7 +180,7 @@ func TestContactsBatchCreate(t *testing.T) {
 	c, rec := mockServer(t, 200, `{
 		"data":[{"object":"contact","index":0,"id":"c1","status":"created"},{"object":"contact","index":2,"id":"c2","status":"updated"}],
 		"counts":{"created":1,"updated":1,"skipped":0,"failed":1},
-		"errors":[{"index":1,"message":"contacts.1: invalid email"}]}`)
+		"errors":[{"index":1,"statusCode":422,"name":"validation_error","message":"contacts.1: invalid email"}]}`)
 	res, err := c.Contacts.Batch.Create([]*CreateContactRequest{
 		{Email: "a@x.dev"}, {Email: "nope"}, {Email: "b@x.dev", FirstName: "B"},
 	}, WithOnConflict(OnConflictUpsert), WithBatchValidation(BatchValidationPermissive))
@@ -195,7 +194,7 @@ func TestContactsBatchCreate(t *testing.T) {
 	assert.Equal(t, BatchContactResult{Object: "contact", Index: 2, Id: "c2", Status: "updated"}, res.Data[1])
 	assert.Equal(t, BatchContactsCounts{Created: 1, Updated: 1, Skipped: 0, Failed: 1}, res.Counts)
 	require.Len(t, res.Errors, 1)
-	assert.Equal(t, BatchError{Index: 1, Message: "contacts.1: invalid email"}, res.Errors[0])
+	assert.Equal(t, BatchError{Index: 1, StatusCode: 422, Name: "validation_error", Message: "contacts.1: invalid email"}, res.Errors[0])
 
 	// Defaults: no query, no header.
 	_, err = c.Contacts.Batch.CreateWithContext(context.Background(), []*CreateContactRequest{{Email: "a@x.dev"}})
@@ -480,6 +479,49 @@ func TestDomains(t *testing.T) {
 	assert.Equal(t, "x.dev", list.Data[0].Name)
 }
 
+func TestDomainsSharedRow(t *testing.T) {
+	c, rec := mockServer(t, 200, `{"object":"domain","id":"sd1","name":"acme.agents.example","status":"verified",
+		"created_at":"2026-10-12T09:00:00.000Z","region":"us-east-1","open_tracking":false,"click_tracking":false,
+		"tracking_subdomain":null,"capabilities":{"sending":"enabled","receiving":"enabled"},"receiving_catch_all":false,
+		"shared":true,"sending_mode":"reply_only","sending_mode_reason":"plan","records":[]}`)
+	d, err := c.Domains.Get("sd1")
+	require.NoError(t, err)
+	assert.Equal(t, "/domains/sd1", rec.Path)
+	assert.Equal(t, Domain{
+		Object: "domain", Id: "sd1", Name: "acme.agents.example", Status: "verified", CreatedAt: "2026-10-12T09:00:00.000Z",
+		Region: "us-east-1", Capabilities: DomainCapabilities{Sending: "enabled", Receiving: "enabled"},
+		Shared: true, SendingMode: "reply_only", SendingModeReason: "plan", Records: []DomainRecord{},
+	}, *d)
+
+	// Own domains carry shared: false and no sending_mode; rows from a server
+	// before v0.14.0 carry no shared at all; the shared row comes last, and a
+	// mode this SDK never saw still decodes.
+	c, _ = mockServer(t, 200, `{"object":"list","has_more":false,"data":[
+		{"id":"d2","name":"acme.dev","status":"verified","shared":false},
+		{"id":"d1","name":"mail.acme.dev","status":"verified"},
+		{"id":"sd1","name":"acme.agents.example","status":"verified","shared":true,
+		 "sending_mode":"paused","sending_mode_reason":null}]}`)
+	list, err := c.Domains.List(nil)
+	require.NoError(t, err)
+	require.Len(t, list.Data, 3)
+	for _, own := range list.Data[:2] {
+		assert.False(t, own.Shared)
+		assert.Empty(t, own.SendingMode)
+		assert.Empty(t, own.SendingModeReason)
+	}
+	assert.True(t, list.Data[2].Shared)
+	assert.Equal(t, "paused", list.Data[2].SendingMode)
+	assert.Empty(t, list.Data[2].SendingModeReason)
+
+	c, _ = mockServer(t, 403, `{"statusCode":403,"name":"forbidden",
+		"message":"acme.agents.example is your team's subdomain of the shared domain: it can't be changed or deleted"}`)
+	_, err = c.Domains.Update("sd1", &UpdateDomainRequest{OpenTracking: Ptr(true)})
+	var mse *MillionSendError
+	require.ErrorAs(t, err, &mse)
+	assert.Equal(t, 403, mse.StatusCode)
+	assert.Equal(t, "forbidden", mse.Name)
+}
+
 func TestWebhooks(t *testing.T) {
 	c, rec := mockServer(t, 200, `{"object":"webhook","id":"w1","signing_secret":"whsec_abc"}`)
 	created, err := c.Webhooks.Create(&CreateWebhookRequest{
@@ -757,7 +799,7 @@ const draftJSON = `{"object":"inbox_draft","id":"d1","type":"reply","to":["ada@x
 const inboxJSON = `{"object":"inbox","id":"i1","name":"Signup bot","email_address":"signup-bot-7f3k@acme.agents.example",
 	"domain_id":"sd1","receiving_address":null,"from_name":null,"unread":2,"drafts":1,
 	"last_received":"2026-10-12T10:00:00.000Z","created_at":"2026-10-12T09:00:00.000Z","kind":"agent","shared":true,
-	"expires_at":"2026-10-13T09:00:00.000Z","quarantined":1,"pending_approval":1}`
+	"expires_at":null,"quarantined":1,"pending_approval":1}`
 
 func TestReceivingListLongPollQueryAndHeld(t *testing.T) {
 	c, rec := mockServer(t, 200, `{"object":"list","has_more":false,"data":[{"id":"r1","from":"a@x.dev",
@@ -791,6 +833,20 @@ func TestReceivingListLongPollQueryAndHeld(t *testing.T) {
 	_, err = c.Emails.Receiving.List(&ListReceivedEmailsOptions{Quarantined: true})
 	require.NoError(t, err)
 	assert.Equal(t, "quarantined=true", rec.RawQuery)
+
+	// unread without inbox_id: an inbox-scoped key reads its own inbox.
+	_, err = c.Emails.Receiving.List(&ListReceivedEmailsOptions{Unread: Ptr(false)})
+	require.NoError(t, err)
+	assert.Equal(t, "unread=false", rec.RawQuery)
+
+	// An inbox the key can't reach is a 404 at once, even on a long-poll.
+	c, rec = mockServer(t, 404, `{"statusCode":404,"name":"not_found","message":"Inbox not found."}`)
+	_, err = c.Emails.Receiving.List(&ListReceivedEmailsOptions{InboxId: "i9", Wait: 30})
+	var mse *MillionSendError
+	require.ErrorAs(t, err, &mse)
+	assert.Equal(t, 404, mse.StatusCode)
+	assert.Equal(t, "not_found", mse.Name)
+	assert.Equal(t, "inbox_id=i9&wait=30", rec.RawQuery)
 }
 
 // A long-poll outlives the client's own timeout by the time it may wait.
@@ -919,7 +975,7 @@ func TestInboxesCreateListGetUpdateRemove(t *testing.T) {
 	assert.Equal(t, Inbox{
 		Object: "inbox", Id: "i1", Name: "Signup bot", EmailAddress: "signup-bot-7f3k@acme.agents.example", DomainId: "sd1",
 		Unread: 2, Drafts: 1, LastReceived: "2026-10-12T10:00:00.000Z", CreatedAt: "2026-10-12T09:00:00.000Z",
-		Kind: "agent", Shared: true, ExpiresAt: "2026-10-13T09:00:00.000Z", Quarantined: 1, PendingApproval: 1,
+		Kind: "agent", Shared: true, Quarantined: 1, PendingApproval: 1,
 	}, *inbox)
 
 	_, err = c.Inboxes.Create(&CreateInboxRequest{
@@ -956,6 +1012,21 @@ func TestInboxesCreateListGetUpdateRemove(t *testing.T) {
 	assert.True(t, rm.Deleted)
 }
 
+func TestInboxesCreateUsernameAndDomainId(t *testing.T) {
+	c, rec := mockServer(t, 201, inboxJSON)
+	_, err := c.Inboxes.Create(&CreateInboxRequest{Username: "signup-bot"})
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"username":"signup-bot"}`, string(rec.Body))
+
+	_, err = c.Inboxes.Create(&CreateInboxRequest{DomainId: "sd1"})
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"domain_id":"sd1"}`, string(rec.Body))
+
+	_, err = c.Inboxes.Create(&CreateInboxRequest{DomainId: "d1", Username: "support"})
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"domain_id":"d1","username":"support"}`, string(rec.Body))
+}
+
 func TestInboxSafetyCodesAndQuarantine(t *testing.T) {
 	c, rec := mockServer(t, 200, `{"object":"inbox_safety","inbox_id":"i1","accept_from":"verified","allowlist":[],
 		"owner_addresses":["ops@acme.dev"],"screening":true,"extract_codes":true,"send_policy":"reply_only",
@@ -983,6 +1054,9 @@ func TestInboxSafetyCodesAndQuarantine(t *testing.T) {
 	assert.Equal(t, "from=github.com&max_age=600&wait=20", rec.RawQuery)
 	assert.Equal(t, "482913", code.Code)
 	assert.Nil(t, code.LinkDomainMatchesSender)
+	_, err = c.Inboxes.Codes.Latest("i1", &LatestCodeOptions{Wait: 30, Since: "2026-10-16T12:00:00.000Z"})
+	require.NoError(t, err)
+	assert.Equal(t, "since=2026-10-16T12%3A00%3A00.000Z&wait=30", rec.RawQuery)
 	_, err = c.Inboxes.Codes.Latest("i1", nil)
 	require.NoError(t, err)
 	assert.Empty(t, rec.RawQuery)
@@ -1038,7 +1112,7 @@ func TestInboxThreads(t *testing.T) {
 	c, rec := mockServer(t, 200, `{"object":"list","has_more":true,"data":[{"id":"t1","subject":"Invoice 42",
 		"from":"Stripe <billing@stripe.com>","to":["bot@acme.dev"],"cc":[],"bcc":[],
 		"labels":[{"id":"l1","name":"Billing","color":"#FFAA00"}],"message_count":2,"has_attachment":true,
-		"has_draft":false,"read":true,"received_at":"2026-10-12T10:00:00.000Z","folder":"quarantine"}]}`)
+		"has_draft":false,"read":true,"quarantined":2,"received_at":"2026-10-12T10:00:00.000Z","folder":"quarantine"}]}`)
 	list, err := c.Inboxes.Threads.List("i1", &ListInboxThreadsOptions{
 		Folders: []string{"inbox", "archive"}, Labels: []string{"l1", "l2"}, Read: Ptr(false), IncludeQuarantined: true,
 		Limit: 20, After: "t0",
@@ -1048,6 +1122,7 @@ func TestInboxThreads(t *testing.T) {
 	assert.Equal(t, "after=t0&folders=inbox%2Carchive&include_quarantined=true&labels=l1%2Cl2&limit=20&read=false", rec.RawQuery)
 	assert.Equal(t, "quarantine", list.Data[0].Folder) // an enum value this SDK never saw still decodes
 	assert.Equal(t, "Billing", list.Data[0].Labels[0].Name)
+	assert.Equal(t, 2, list.Data[0].Quarantined)
 
 	c, rec = mockServer(t, 200, `{"object":"list","has_more":false,"data":[{"id":"t1","matched_email_id":"m2",
 		"highlights":{"subject":["**Invoice** 42"]}}]}`)
@@ -1061,6 +1136,7 @@ func TestInboxThreads(t *testing.T) {
 		"&query=%22invoice+42%22+-spam&start_date=2026-10-01&to=bot%40acme.dev", rec.RawQuery)
 	assert.Equal(t, "m2", found.Data[0].MatchedEmailId)
 	assert.Equal(t, []string{"**Invoice** 42"}, found.Data[0].Highlights["subject"])
+	assert.Zero(t, found.Data[0].Quarantined)
 
 	c, rec = mockServer(t, 200, `{"object":"inbox_thread","id":"t1","subject":null,"folder":"archive","labels":[],"read":true,"quarantined":0}`)
 	th, err := c.Inboxes.Threads.Get("i1", "t1")

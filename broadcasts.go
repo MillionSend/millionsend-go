@@ -9,7 +9,9 @@ import (
 // CreateBroadcastRequest is the payload for Broadcasts.Create. SegmentId and
 // TopicId are optional targeting; neither set sends to all the team's contacts.
 // Send: true sends (or, with ScheduledAt, schedules) immediately instead of
-// saving a draft.
+// saving a draft. Subject takes up to 998 characters. Broadcasts never send
+// from the shared domain: sending one whose From is there answers 403
+// inbox_send_policy.
 type CreateBroadcastRequest struct {
 	Name        string `json:"name,omitempty"`
 	SegmentId   string `json:"segment_id,omitempty"`
