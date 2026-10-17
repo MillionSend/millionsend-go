@@ -111,7 +111,10 @@ plain text, which surfaces as `application_error` with `StatusCode` 404.
 
 `Emails.Send` and `Batch.Send` answer `422 all_recipients_suppressed` when every
 `To` recipient is on the suppression list or opted out of the send's `TopicId`;
-nothing is sent.
+nothing is sent. An `Emails.Send` that the suppression list alone refuses still
+keeps a metadata-only `suppressed` email, which fires `email.suppressed`, and
+each retry keeps another, even with the same `WithIdempotencyKey` (a refused
+send doesn't hold its key).
 
 ### Retries
 
@@ -650,20 +653,20 @@ for _, d := range page.Data {
 Events: `email.scheduled`, `email.sent`, `email.delivered`,
 `email.delivery_delayed`, `email.bounced`, `email.complained`,
 `email.failed`, `email.suppressed`, `email.opened`, `email.clicked`,
-`contact.created`, `contact.updated`, `contact.deleted`, plus the MillionSend
-extensions `contact.unsubscribed`, `contact.resubscribed`,
-`contact.topic_opt_in`, `contact.topic_opt_out`, `suppression.added`,
-`suppression.removed`, `deliverability.warning`, `deliverability.paused`,
-`quota.warning`, `quota.reached`, `quota.paused`, `email.received`, and the
-inbox events `inbox.created`, `inbox.updated`, `inbox.deleted`,
+`email.received`, `contact.created`, `contact.updated`, `contact.deleted`,
+`suppression.added`, `suppression.removed`, plus the MillionSend extensions
+`email.prefetched`, `contact.unsubscribed`, `contact.resubscribed`,
+`contact.topic_opt_in`, `contact.topic_opt_out`, `deliverability.warning`,
+`deliverability.paused`, `quota.warning`, `quota.reached`, `quota.paused`,
+and the inbox events `inbox.created`, `inbox.updated`, `inbox.deleted`,
 `inbox.expired`, `inbox.thread.created`, `inbox.thread.folder.updated`,
 `inbox.thread.labels.updated`, `inbox.email.received`, `inbox.email.sent`,
 `inbox.email.quarantined`, `inbox.draft.created`, `inbox.draft.updated`,
-`inbox.draft.sent`, `inbox.draft.deleted`. Inbox events are opt-in: an
-endpoint gets them only when its `Events` name them, and `InboxIds` limits
-them (and `email.received`) to those inboxes. Their `data.source` says who
-acted: `api`, `dashboard` or `system`. A shared-domain inbox deleted after 90
-unused days fires `inbox.expired`, then `inbox.deleted`.
+`inbox.draft.sent`, `inbox.draft.deleted`. `email.prefetched` and inbox events
+are opt-in: an endpoint gets them only when its `Events` name them, and
+`InboxIds` limits inbox events (and `email.received`) to those inboxes. Their
+`data.source` says who acted: `api`, `dashboard` or `system`. A shared-domain
+inbox deleted after 90 unused days fires `inbox.expired`, then `inbox.deleted`.
 
 `email.failed` says why in `data.failed.reason`, and `email.suppressed` in
 `data.suppressed` (`type`, `message` and `reason`); new values may appear
@@ -793,7 +796,7 @@ On a self-hosted instance, each feature needs at least this MillionSend version:
 | v0.12.0 | `Username`; inboxes that never expire by default; sends from shared-domain inboxes; `name_review_unavailable` and the daily name-review budget; `StatusCode`/`Name` on contacts-batch errors |
 | v0.13.0 | Newest-first lists; `Since` on `Codes.Latest`; `Quarantined` on thread items; inbox names up to 320 characters; `404` at once for an unknown `InboxId`; `Unread` on inbox-scoped keys; JSON `404` for unknown routes |
 | v0.14.0 | The shared row in `Domains.List` (`Shared`, `SendingMode`, `SendingModeReason`); `DomainId` on `Inboxes.Create`; `Subject` up to 998 characters |
-| v0.15.1 | The `email.scheduled`, `email.failed` and `email.suppressed` webhook events; `source_id` on `suppression.added` and `suppression.removed` |
+| v0.15.1 | The `email.scheduled`, `email.failed` and `email.suppressed` webhook events; `source_id` on `suppression.added` and `suppression.removed`; a `suppressed` email kept on `all_recipients_suppressed` |
 
 ## Migrating from Resend
 
@@ -827,8 +830,8 @@ Method names and nesting match (`client.Emails.Send`, `client.Contacts`,
   `Contacts.CreatePreferencesLink`, `Webhooks.Rotate`, `Deliverability`,
   `Usage`, `Emails.GetInsights`, the `unsubscribe` suppression origin, the
   receiving long-poll, `Emails.Receiving.Reply/Forward/Remove`,
-  `Inboxes.Safety/Codes/Quarantine`, and the `deliverability.*` / `quota.*` /
-  `suppression.*` webhook events (plus the `contact.*` events beyond Resend's
+  `Inboxes.Safety/Codes/Quarantine`, and the `deliverability.*` / `quota.*`
+  webhook events (plus the `contact.*` events beyond Resend's
   created/updated/deleted).
 
 ## License
