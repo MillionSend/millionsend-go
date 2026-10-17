@@ -647,8 +647,9 @@ for _, d := range page.Data {
 
 ### Webhooks
 
-Events: `email.sent`, `email.delivered`, `email.delivery_delayed`,
-`email.bounced`, `email.complained`, `email.opened`, `email.clicked`,
+Events: `email.scheduled`, `email.sent`, `email.delivered`,
+`email.delivery_delayed`, `email.bounced`, `email.complained`,
+`email.failed`, `email.suppressed`, `email.opened`, `email.clicked`,
 `contact.created`, `contact.updated`, `contact.deleted`, plus the MillionSend
 extensions `contact.unsubscribed`, `contact.resubscribed`,
 `contact.topic_opt_in`, `contact.topic_opt_out`, `suppression.added`,
@@ -663,6 +664,13 @@ endpoint gets them only when its `Events` name them, and `InboxIds` limits
 them (and `email.received`) to those inboxes. Their `data.source` says who
 acted: `api`, `dashboard` or `system`. A shared-domain inbox deleted after 90
 unused days fires `inbox.expired`, then `inbox.deleted`.
+
+`email.failed` says why in `data.failed.reason`, and `email.suppressed` in
+`data.suppressed` (`type`, `message` and `reason`); new values may appear
+without an SDK update. `suppression.added` and `suppression.removed` carry
+`data.source_id`, the email whose bounce or complaint created the entry (null
+otherwise). Servers before v0.15.1 answer `422 validation_error` to a webhook
+that names `email.scheduled`, `email.failed` or `email.suppressed`.
 
 ```go
 w, _ := client.Webhooks.Create(&millionsend.CreateWebhookRequest{
@@ -785,6 +793,7 @@ On a self-hosted instance, each feature needs at least this MillionSend version:
 | v0.12.0 | `Username`; inboxes that never expire by default; sends from shared-domain inboxes; `name_review_unavailable` and the daily name-review budget; `StatusCode`/`Name` on contacts-batch errors |
 | v0.13.0 | Newest-first lists; `Since` on `Codes.Latest`; `Quarantined` on thread items; inbox names up to 320 characters; `404` at once for an unknown `InboxId`; `Unread` on inbox-scoped keys; JSON `404` for unknown routes |
 | v0.14.0 | The shared row in `Domains.List` (`Shared`, `SendingMode`, `SendingModeReason`); `DomainId` on `Inboxes.Create`; `Subject` up to 998 characters |
+| v0.15.1 | The `email.scheduled`, `email.failed` and `email.suppressed` webhook events; `source_id` on `suppression.added` and `suppression.removed` |
 
 ## Migrating from Resend
 
