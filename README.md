@@ -104,7 +104,10 @@ Receiving and inboxes add the names `inbox_send_policy`, `inbox_send_cap_reached
 `approval_required`, `email_quarantined`, `email_blocked`, `too_many_waits`,
 `plan_limit_reached` and `name_review_unavailable` (503, see
 [the shared domain](#the-shared-domain)). Changes to the shared domain's row
-in `Domains` answer `403 forbidden`.
+in `Domains` answer `403 forbidden`. `Inboxes.Quarantine.Release` adds
+`trust_not_allowed` (403) and `held_by_screening` (409), see
+[Inboxes](#inboxes-beta); it answers `forbidden` (403) and
+`screening_unavailable` (503) only to MCP tokens.
 
 An unknown route answers `404 not_found`. Servers before v0.13.0 answer it in
 plain text, which surfaces as `application_error` with `StatusCode` 404.
@@ -355,7 +358,7 @@ next, _ := client.Inboxes.Codes.Latest(inbox.Id, &millionsend.LatestCodeOptions{
 
 // Quarantine: held mail is kept and listed; agents see it only once a person releases it
 client.Inboxes.Quarantine.List(inbox.Id, nil)
-client.Inboxes.Quarantine.Release(inbox.Id, emailID, &millionsend.ReleaseQuarantinedRequest{TrustSender: true})
+client.Inboxes.Quarantine.Release(inbox.Id, emailID, nil)
 
 // Threads and their messages
 client.Inboxes.Threads.List(inbox.Id, &millionsend.ListInboxThreadsOptions{Folders: []string{"inbox", "archive"}, Read: millionsend.Ptr(false)})
@@ -394,6 +397,14 @@ draft that waits for approval (`approval_required`); a person in the dashboard
 or a full-access team key can. Slices in list and search options (`Folders`,
 `Labels`, `From`, …) go out as one comma-separated value. Resend's hosted agent
 settings (`/inboxes/:id/agent`) are not exposed: MillionSend runs no agent.
+
+On an agent inbox with `Screening` on, mail held before screening ran
+(`not_allowlisted`, `unauthenticated_sender`, `failed_auth`) is screened at
+release when screening can run: if it finds prompt injection or phishing, the
+email stays held as `injection` or `phishing` (`409 held_by_screening`).
+`TrustSender: true` also adds the sender to the allowlist, only for mail held
+as `not_allowlisted` from a sender that authenticated (`SenderTrust`
+`"external"`); anything else answers `403 trust_not_allowed`.
 
 `Inboxes.Create` takes no Idempotency-Key. After a 503 or 429 nothing was
 created, so sending it again is safe; after a timeout a retry may create a
@@ -798,6 +809,7 @@ On a self-hosted instance, each feature needs at least this MillionSend version:
 | v0.13.0 | Newest-first lists; `Since` on `Codes.Latest`; `Quarantined` on thread items; inbox names up to 320 characters; `404` at once for an unknown `InboxId`; `Unread` on inbox-scoped keys; JSON `404` for unknown routes |
 | v0.14.0 | The shared row in `Domains.List` (`Shared`, `SendingMode`, `SendingModeReason`); `DomainId` on `Inboxes.Create`; `Subject` up to 998 characters |
 | v0.15.1 | The `email.scheduled`, `email.failed` and `email.suppressed` webhook events; `source_id` on `suppression.added` and `suppression.removed`; a `suppressed` email kept on `all_recipients_suppressed` |
+| v0.16.0 | Release rules: `TrustSender` only for a `not_allowlisted` hold from an authenticated sender (`trust_not_allowed`); screening at release (`held_by_screening`) |
 
 ## Migrating from Resend
 
