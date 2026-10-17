@@ -664,9 +664,10 @@ and the inbox events `inbox.created`, `inbox.updated`, `inbox.deleted`,
 `inbox.email.quarantined`, `inbox.draft.created`, `inbox.draft.updated`,
 `inbox.draft.sent`, `inbox.draft.deleted`. `email.prefetched` and inbox events
 are opt-in: an endpoint gets them only when its `Events` name them, and
-`InboxIds` limits inbox events (and `email.received`) to those inboxes. Their
-`data.source` says who acted: `api`, `dashboard` or `system`. A shared-domain
-inbox deleted after 90 unused days fires `inbox.expired`, then `inbox.deleted`.
+`InboxIds` limits inbox events (and `email.received`) to those inboxes. Inbox
+events' `data.source` says who acted: `api`, `dashboard` or `system`. A
+shared-domain inbox deleted after 90 unused days fires `inbox.expired`, then
+`inbox.deleted`.
 
 `email.failed` says why in `data.failed.reason`, and `email.suppressed` in
 `data.suppressed` (`type`, `message` and `reason`); new values may appear
@@ -830,9 +831,9 @@ Method names and nesting match (`client.Emails.Send`, `client.Contacts`,
   `Contacts.CreatePreferencesLink`, `Webhooks.Rotate`, `Deliverability`,
   `Usage`, `Emails.GetInsights`, the `unsubscribe` suppression origin, the
   receiving long-poll, `Emails.Receiving.Reply/Forward/Remove`,
-  `Inboxes.Safety/Codes/Quarantine`, and the `deliverability.*` / `quota.*`
-  webhook events (plus the `contact.*` events beyond Resend's
-  created/updated/deleted).
+  `Inboxes.Safety/Codes/Quarantine`, and the `email.prefetched` /
+  `deliverability.*` / `quota.*` webhook events (plus the `contact.*` events
+  beyond Resend's created/updated/deleted).
 
 ## License
 
