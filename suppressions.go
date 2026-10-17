@@ -30,8 +30,8 @@ type AddSuppressionResponse struct {
 }
 
 // Suppression is a blocked address, as returned by Get and as a List row (rows
-// carry no Object). SourceId is the email whose bounce/complaint created the
-// entry; nil for manual ones. An erased address (GDPR/LGPD) reads "[erased]".
+// carry no Object). SourceId is the email whose bounce or complaint created the
+// entry; nil otherwise. An erased address (GDPR/LGPD) reads "[erased]".
 type Suppression struct {
 	Object    string  `json:"object"`
 	Id        string  `json:"id"`
