@@ -557,8 +557,9 @@ rm, err = client.Contacts.Batch.Remove(&millionsend.BatchRemoveContactsRequest{I
 
 ### Contact properties
 
-The schema of the custom properties contacts carry. `Type` is `"string"` or
-`"number"`; `FallbackValue` fills merge fields when a contact has no value.
+The schema of the custom properties contacts carry. `Type` is `"string"`,
+`"number"` or `"date"` (a MillionSend extension); `FallbackValue` fills merge
+fields when a contact has no value.
 
 ```go
 client.ContactProperties.Create(&millionsend.CreateContactPropertyRequest{Key: "plan", Type: "string", FallbackValue: "free"})
@@ -567,6 +568,14 @@ client.ContactProperties.Get(id)
 client.ContactProperties.Update(id, &millionsend.UpdateContactPropertyRequest{FallbackValue: "trial"}) // nil clears
 client.ContactProperties.Remove(id)
 ```
+
+A date property's values and fallback must read as a date, or the write is a
+`422`: an ISO 8601 date such as `2026-01-08` (midnight UTC), a date-time with
+`T` or a space such as `2026-01-08T10:30:00Z` or `2026-01-08 10:30` (UTC when
+it names no zone), or Unix time in seconds or milliseconds from 2000 to 2100,
+such as `1767225600`. A `time.Time` marshals to a date-time that qualifies.
+`Contacts.Get` returns the date as stored, as a string:
+`{Type: "date", Value: "2026-01-08"}`.
 
 ### Topics
 
@@ -769,6 +778,12 @@ client.Segments.Update(id, &millionsend.UpdateSegmentRequest{Name: "Pro tier"})
 client.Segments.Remove(id)
 ```
 
+Date ops work on `created_at` and on any `property:<key>`: `before` and `after`
+take an ISO 8601 date or date-time, and `in_last_days` and `not_in_last_days`
+a whole number of days from 1 to 36500, still a string (`Value: "90"`). A
+property value that doesn't read as a date (see
+[Contact properties](#contact-properties)) matches none of them.
+
 `UpdateSegmentRequest.ClearFilter()` sends `filter: null`, turning a filtered
 segment into a manual one.
 
@@ -810,6 +825,7 @@ On a self-hosted instance, each feature needs at least this MillionSend version:
 | v0.14.0 | The shared row in `Domains.List` (`Shared`, `SendingMode`, `SendingModeReason`); `DomainId` on `Inboxes.Create`; `Subject` up to 998 characters |
 | v0.15.1 | The `email.scheduled`, `email.failed` and `email.suppressed` webhook events; `source_id` on `suppression.added` and `suppression.removed`; a `suppressed` email kept on `all_recipients_suppressed` |
 | v0.16.0 | Release rules: `TrustSender` only for a `not_allowlisted` hold from an authenticated sender (`trust_not_allowed`); screening at release (`held_by_screening`) |
+| v0.22.0 | The `date` contact property type; the date segment ops on `property:<key>`, and `in_last_days` and `not_in_last_days` on `created_at` |
 
 ## Migrating from Resend
 
@@ -841,11 +857,11 @@ Method names and nesting match (`client.Emails.Send`, `client.Contacts`,
   list rows and full reads.
 - **Extensions with no Resend counterpart**: `Segments`, `Contacts.Batch`,
   `Contacts.CreatePreferencesLink`, `Webhooks.Rotate`, `Deliverability`,
-  `Usage`, `Emails.GetInsights`, the `unsubscribe` suppression origin, the
-  receiving long-poll, `Emails.Receiving.Reply/Forward/Remove`,
-  `Inboxes.Safety/Codes/Quarantine`, and the `email.prefetched` /
-  `deliverability.*` / `quota.*` webhook events (plus the `contact.*` events
-  beyond Resend's created/updated/deleted).
+  `Usage`, `Emails.GetInsights`, the `date` contact property type, the
+  `unsubscribe` suppression origin, the receiving long-poll,
+  `Emails.Receiving.Reply/Forward/Remove`, `Inboxes.Safety/Codes/Quarantine`,
+  and the `email.prefetched` / `deliverability.*` / `quota.*` webhook events
+  (plus the `contact.*` events beyond Resend's created/updated/deleted).
 
 ## License
 

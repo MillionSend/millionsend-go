@@ -89,7 +89,8 @@ type ContactId struct {
 }
 
 // ContactPropertyValue is one custom property as returned by Contacts.Get:
-// Value is a string or a float64, per Type ("string" | "number").
+// Value is a float64 when Type is "number", and a string when it is "string"
+// or "date" (the date as stored, such as "2026-01-08").
 type ContactPropertyValue struct {
 	Type  string `json:"type"`
 	Value any    `json:"value"`

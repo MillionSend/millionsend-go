@@ -9,7 +9,10 @@ import (
 
 // SegmentCondition is one clause of a segment filter. The wire requires the
 // value key on every condition; presence ops ("is_set", "is_not_set") ignore
-// it, so leave Value empty for those.
+// it, so leave Value empty for those. "created_at" and any "property:<key>"
+// take the date ops "before" and "after", whose Value is an ISO 8601 date or
+// date-time, and "in_last_days" and "not_in_last_days", whose Value is a whole
+// number of days from 1 to 36500, such as "30".
 type SegmentCondition struct {
 	Field string `json:"field"`
 	Op    string `json:"op"`
