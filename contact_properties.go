@@ -7,8 +7,12 @@ import (
 )
 
 // CreateContactPropertyRequest declares a custom contact property. Type is
-// "string" or "number"; FallbackValue (a string or number matching Type) is
-// used in merge fields when a contact has no value.
+// "string", "number" or "date" (a MillionSend extension); FallbackValue (a
+// string or number matching Type) is used in merge fields when a contact has
+// no value. A date property's values and fallback must read as a date, or the
+// write is a 422: an ISO 8601 date (midnight UTC), a date-time with T or a
+// space (UTC when it names no zone), or Unix time in seconds or milliseconds
+// from 2000 to 2100. A time.Time marshals to a date-time that qualifies.
 type CreateContactPropertyRequest struct {
 	Key           string `json:"key"`
 	Type          string `json:"type"`
